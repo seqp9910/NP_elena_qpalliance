@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: elena-np
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: BREVO_API_KEY
+        sync: false   # se configura manualmente en el dashboard de Render

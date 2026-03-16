@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Elena — Notificaciones Personales</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --pink: #D4006A;
+      --pink-dim: #a0004f;
+      --bg: #0a0a0a;
+      --surface: #111111;
+      --surface2: #1a1a1a;
+      --border: #2a2a2a;
+      --text: #e0e0e0;
+      --muted: #888888;
+      --green: #4ade80;
+      --yellow: #fbbf24;
+      --red: #f87171;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+    }
+
+    /* ─── HEADER ─── */
+    header {
+      background: linear-gradient(135deg, #1a0011, #2a0020, #0a0a0a);
+      border-bottom: 2px solid var(--pink);
+      padding: 20px 40px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .logo-area { display: flex; align-items: center; gap: 16px; }
+    .logo-img { height: 48px; }
+    .logo-tagline { font-size: 0.8em; color: var(--muted); margin-top: 2px; }
+    .header-right { text-align: right; }
+    .header-right h1 { font-size: 1.1em; color: var(--pink); }
+    .header-right p { font-size: 0.8em; color: var(--muted); margin-top: 3px; }
+
+    /* ─── MAIN LAYOUT ─── */
+    main {
+      max-width: 820px;
+      margin: 40px auto;
+      padding: 0 20px 80px;
+    }
+
+    /* ─── STEPPER ─── */
+    .stepper {
+      display: flex;
+      align-items: center;
+      margin-bottom: 36px;
+      gap: 0;
+    }
+    .step-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      flex: 1;
+      position: relative;
+    }
+    .step-item:not(:last-child)::after {
+      content: '';
+      position: absolute;
+      top: 16px;
+      left: 50%;
+      width: 100%;
+      height: 2px;
+      background: var(--border);
+      z-index: 0;
+      transition: background 0.4s;
+    }
+    .step-item.done:not(:last-child)::after { background: var(--pink); }
+    .step-circle {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      background: var(--surface2);
+      border: 2px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.8em; font-weight: 700; color: var(--muted);
+      position: relative; z-index: 1;
+      transition: all 0.3s;
+    }
+    .step-item.active .step-circle {
+      background: var(--pink); border-color: var(--pink); color: #fff;
+      box-shadow: 0 0 12px rgba(212,0,106,0.5);
+    }
+    .step-item.done .step-circle {
+      background: var(--pink-dim); border-color: var(--pink); color: #fff;
+    }
+    .step-label {
+      font-size: 0.7em; color: var(--muted); margin-top: 6px;
+      text-align: center; max-width: 80px; line-height: 1.3;
+    }
+    .step-item.active .step-label { color: var(--pink); }
+
+    /* ─── CARDS ─── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px 32px;
+      margin-bottom: 16px;
+      display: none;
+      animation: fadeIn 0.3s ease;
+    }
+    .card.active { display: block; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+    .card-title {
+      font-size: 1.1em; font-weight: 700; color: var(--pink);
+      margin-bottom: 6px; display: flex; align-items: center; gap: 10px;
+    }
+    .card-title .icon { font-size: 1.2em; }
+    .card-desc { font-size: 0.88em; color: var(--muted); margin-bottom: 20px; line-height: 1.6; }
+
+    /* ─── INPUTS ─── */
+    label { display: block; font-size: 0.85em; color: var(--muted); margin-bottom: 6px; }
+    textarea, input[type="text"], input[type="email"] {
+      width: 100%;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 0.95em;
+      padding: 12px 14px;
+      outline: none;
+      transition: border-color 0.2s;
+      font-family: inherit;
+    }
+    textarea:focus, input:focus { border-color: var(--pink); }
+    textarea { resize: vertical; min-height: 90px; }
+    .input-hint { font-size: 0.78em; color: var(--muted); margin-top: 6px; }
+
+    /* ─── FILE DROP ─── */
+    .file-drop {
+      border: 2px dashed var(--border);
+      border-radius: 10px;
+      padding: 28px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+    }
+    .file-drop:hover, .file-drop.dragover {
+      border-color: var(--pink);
+      background: rgba(212,0,106,0.04);
+    }
+    .file-drop input[type="file"] {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+    }
+    .file-drop .drop-icon { font-size: 2em; margin-bottom: 8px; }
+    .file-drop .drop-text { font-size: 0.9em; color: var(--muted); }
+    .file-drop .drop-text strong { color: var(--pink); }
+    .file-list { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .file-tag {
+      background: rgba(212,0,106,0.12); border: 1px solid rgba(212,0,106,0.3);
+      border-radius: 20px; padding: 4px 12px; font-size: 0.78em; color: var(--pink);
+      display: flex; align-items: center; gap: 6px;
+    }
+
+    /* ─── EMAIL ROW ─── */
+    .email-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 600px) { .email-row { grid-template-columns: 1fr; } }
+
+    /* ─── BUTTONS ─── */
+    .btn-row { display: flex; justify-content: flex-end; margin-top: 24px; gap: 12px; }
+    .btn {
+      padding: 11px 28px; border-radius: 8px; font-size: 0.95em;
+      font-weight: 600; cursor: pointer; border: none; transition: all 0.2s;
+      font-family: inherit;
+    }
+    .btn-primary {
+      background: var(--pink); color: #fff;
+    }
+    .btn-primary:hover { background: #b30059; transform: translateY(-1px); box-shadow: 0 4px 16px rgba(212,0,106,0.35); }
+    .btn-primary:disabled { background: #4a0025; color: #888; cursor: not-allowed; transform: none; box-shadow: none; }
+    .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+    .btn-ghost:hover { border-color: var(--pink); color: var(--pink); }
+
+    /* ─── PROGRESS ─── */
+    #progress-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px 32px;
+      display: none;
+    }
+    #progress-card.active { display: block; animation: fadeIn 0.3s ease; }
+
+    .progress-bar-wrap {
+      background: var(--surface2); border-radius: 8px; height: 6px;
+      margin: 16px 0; overflow: hidden;
+    }
+    .progress-bar { height: 100%; background: var(--pink); border-radius: 8px; width: 0; transition: width 0.5s ease; }
+
+    .log-box {
+      background: #060606; border: 1px solid var(--border); border-radius: 8px;
+      padding: 14px 16px; font-family: 'Courier New', monospace; font-size: 0.82em;
+      max-height: 260px; overflow-y: auto; margin-top: 14px; line-height: 1.8;
+    }
+    .log-info  { color: #b0b0b0; }
+    .log-warn  { color: var(--yellow); }
+    .log-error { color: var(--red); }
+
+    /* ─── DONE ─── */
+    #done-card {
+      background: var(--surface);
+      border: 1px solid #1a3a1a;
+      border-radius: 16px;
+      padding: 32px;
+      display: none;
+      text-align: center;
+    }
+    #done-card.active { display: block; animation: fadeIn 0.3s ease; }
+    .done-icon { font-size: 3em; margin-bottom: 12px; }
+    .done-title { font-size: 1.4em; font-weight: 700; color: var(--green); margin-bottom: 6px; }
+    .done-sub { color: var(--muted); font-size: 0.9em; margin-bottom: 24px; }
+    .download-btn {
+      display: inline-flex; align-items: center; gap: 10px;
+      background: var(--pink); color: #fff; padding: 14px 32px;
+      border-radius: 10px; text-decoration: none; font-weight: 700;
+      font-size: 1em; transition: all 0.2s;
+    }
+    .download-btn:hover { background: #b30059; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(212,0,106,0.4); }
+    .errors-box {
+      background: rgba(248,113,113,0.08); border: 1px solid rgba(248,113,113,0.2);
+      border-radius: 8px; padding: 14px 16px; margin-top: 20px; text-align: left;
+      font-size: 0.85em; color: var(--red); line-height: 1.8;
+    }
+    .errors-title { font-weight: 700; margin-bottom: 6px; color: var(--red); }
+
+    /* ─── ERROR CARD ─── */
+    #error-card {
+      background: rgba(248,113,113,0.06); border: 1px solid rgba(248,113,113,0.25);
+      border-radius: 16px; padding: 24px 28px; display: none;
+    }
+    #error-card.active { display: block; animation: fadeIn 0.3s; }
+    #error-card p { color: var(--red); font-size: 0.95em; }
+
+    /* ─── FOOTER ─── */
+    footer {
+      text-align: center; padding: 30px; border-top: 1px solid var(--border);
+      color: var(--muted); font-size: 0.8em; margin-top: 60px;
+    }
+    footer span { color: var(--pink); font-weight: 700; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo-area">
+    <!-- Elena SVG logo (inline, since image may not be available) -->
+    <svg viewBox="0 0 220 48" height="40" xmlns="http://www.w3.org/2000/svg">
+      <!-- qpa node icon -->
+      <circle cx="14" cy="10" r="5" fill="#D4006A"/>
+      <circle cx="34" cy="10" r="5" fill="#D4006A"/>
+      <circle cx="24" cy="28" r="5" fill="#D4006A"/>
+      <circle cx="14" cy="42" r="3.5" fill="#D4006A" opacity="0.5"/>
+      <circle cx="34" cy="42" r="3.5" fill="#D4006A" opacity="0.5"/>
+      <line x1="14" y1="10" x2="34" y2="10" stroke="#D4006A" stroke-width="2"/>
+      <line x1="14" y1="10" x2="24" y2="28" stroke="#D4006A" stroke-width="2"/>
+      <line x1="34" y1="10" x2="24" y2="28" stroke="#D4006A" stroke-width="2"/>
+      <line x1="14" y1="42" x2="34" y2="42" stroke="#D4006A" stroke-width="1.5" opacity="0.5"/>
+      <!-- elena text -->
+      <text x="50" y="36" font-family="Segoe UI,system-ui,sans-serif" font-size="34" font-weight="700" fill="#ffffff">elena</text>
+    </svg>
+    <div>
+      <div class="logo-tagline">Empowered by <strong style="color:#D4006A">qpalliance</strong></div>
+    </div>
+  </div>
+  <div class="header-right">
+    <h1>Notificaciones Personales</h1>
+    <p>Pipeline automatizado de radicación judicial</p>
+  </div>
+</header>
+
+<main>
+
+  <!-- STEPPER -->
+  <div class="stepper" id="stepper">
+    <div class="step-item active" data-step="1">
+      <div class="step-circle">1</div>
+      <div class="step-label">Códigos</div>
+    </div>
+    <div class="step-item" data-step="2">
+      <div class="step-circle">2</div>
+      <div class="step-label">Base de Radicación</div>
+    </div>
+    <div class="step-item" data-step="3">
+      <div class="step-circle">3</div>
+      <div class="step-label">Autos</div>
+    </div>
+    <div class="step-item" data-step="4">
+      <div class="step-circle">4</div>
+      <div class="step-label">Demandas</div>
+    </div>
+    <div class="step-item" data-step="5">
+      <div class="step-circle">5</div>
+      <div class="step-label">Correo</div>
+    </div>
+  </div>
+
+  <!-- STEP 1: CÓDIGOS -->
+  <div class="card active" id="step-1">
+    <div class="card-title"><span class="icon">🔢</span> Códigos del lote</div>
+    <div class="card-desc">
+      Ingresa los códigos de los casos que quieres procesar en este lote.
+      Sepáralos con punto y coma <strong style="color:#D4006A">;</strong>
+    </div>
+    <label>Códigos (separados por ;)</label>
+    <textarea id="codes-input" placeholder="Ejemplo: 1372; 1496; 1563; 2010"></textarea>
+    <p class="input-hint" id="codes-count">Ingresa al menos un código</p>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="goStep(2)" id="btn-step1">Siguiente →</button>
+    </div>
+  </div>
+
+  <!-- STEP 2: BASE RADICACIÓN -->
+  <div class="card" id="step-2">
+    <div class="card-title"><span class="icon">📊</span> Base de Radicación de Demandas</div>
+    <div class="card-desc">
+      Sube el archivo Excel con la base completa de radicación. Debe tener una hoja llamada <strong>Total</strong>
+      con las columnas: <strong>#, Nombre, Ciudad, Juzgado, Radicado, Fecha_Demanda</strong>.
+    </div>
+    <label>Archivo Excel (.xlsx)</label>
+    <div class="file-drop" id="drop-base" onclick="document.getElementById('file-base').click()">
+      <input type="file" id="file-base" accept=".xlsx,.xls" onchange="handleFile('base', this)">
+      <div class="drop-icon">📂</div>
+      <div class="drop-text">Arrastra aquí o <strong>haz clic para seleccionar</strong></div>
+    </div>
+    <div class="file-list" id="files-base"></div>
+    <div class="btn-row">
+      <button class="btn btn-ghost" onclick="goStep(1)">← Atrás</button>
+      <button class="btn btn-primary" onclick="goStep(3)" id="btn-step2" disabled>Siguiente →</button>
+    </div>
+  </div>
+
+  <!-- STEP 3: AUTOS -->
+  <div class="card" id="step-3">
+    <div class="card-title"><span class="icon">⚖️</span> Autos Admisorios</div>
+    <div class="card-desc">
+      Sube los PDFs de los autos admisorios de todos los casos del lote.
+      Puedes seleccionar varios archivos a la vez. El sistema los cruza automáticamente
+      por número de radicado.
+    </div>
+    <label>PDFs de autos admisorios (múltiples)</label>
+    <div class="file-drop" id="drop-autos" onclick="document.getElementById('file-autos').click()">
+      <input type="file" id="file-autos" accept=".pdf" multiple onchange="handleFiles('autos', this)">
+      <div class="drop-icon">📄</div>
+      <div class="drop-text">Arrastra aquí o <strong>haz clic para seleccionar</strong> (múltiples PDFs)</div>
+    </div>
+    <div class="file-list" id="files-autos"></div>
+    <div class="btn-row">
+      <button class="btn btn-ghost" onclick="goStep(2)">← Atrás</button>
+      <button class="btn btn-primary" onclick="goStep(4)" id="btn-step3" disabled>Siguiente →</button>
+    </div>
+  </div>
+
+  <!-- STEP 4: DEMANDAS -->
+  <div class="card" id="step-4">
+    <div class="card-title"><span class="icon">📋</span> PDFs de Demandas</div>
+    <div class="card-desc">
+      Sube los PDFs de las demandas. El nombre de cada archivo debe contener
+      <strong style="color:#D4006A">R{código}DDD</strong>
+      (ej: <code style="color:#aaa">R1372DDD_rappi.pdf</code>).
+    </div>
+    <label>PDFs de demandas (múltiples)</label>
+    <div class="file-drop" id="drop-demandas" onclick="document.getElementById('file-demandas').click()">
+      <input type="file" id="file-demandas" accept=".pdf" multiple onchange="handleFiles('demandas', this)">
+      <div class="drop-icon">📋</div>
+      <div class="drop-text">Arrastra aquí o <strong>haz clic para seleccionar</strong> (múltiples PDFs)</div>
+    </div>
+    <div class="file-list" id="files-demandas"></div>
+    <div class="btn-row">
+      <button class="btn btn-ghost" onclick="goStep(3)">← Atrás</button>
+      <button class="btn btn-primary" onclick="goStep(5)" id="btn-step4" disabled>Siguiente →</button>
+    </div>
+  </div>
+
+  <!-- STEP 5: CORREO -->
+  <div class="card" id="step-5">
+    <div class="card-title"><span class="icon">📧</span> Correo Electrónico</div>
+    <div class="card-desc">
+      Los correos se envían desde <strong>notificacionesjudiciales@qpalliance.co</strong>.
+      Ingresa el correo destino y, si aplica, quien va en copia.
+    </div>
+    <div class="email-row">
+      <div>
+        <label>Correo destino *</label>
+        <input type="email" id="to-email" placeholder="notificaciones@empresa.com" oninput="checkStep5()">
+      </div>
+      <div>
+        <label>Copia (CC) — opcional</label>
+        <input type="email" id="cc-email" placeholder="gerente@empresa.com">
+      </div>
+    </div>
+    <div style="margin-top:20px;padding:14px 16px;background:var(--surface2);border-radius:8px;display:flex;align-items:center;gap:12px">
+      <label style="margin:0;display:flex;align-items:center;gap:10px;cursor:pointer;color:var(--text)">
+        <input type="checkbox" id="send-emails" checked style="width:16px;height:16px;accent-color:var(--pink)">
+        Enviar correos automáticamente al procesar
+      </label>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-ghost" onclick="goStep(4)">← Atrás</button>
+      <button class="btn btn-primary" onclick="startProcess()" id="btn-process" disabled>
+        🚀 Procesar lote
+      </button>
+    </div>
+  </div>
+
+  <!-- PROGRESS -->
+  <div id="progress-card">
+    <div class="card-title" style="margin-bottom:8px"><span class="icon">⚙️</span> Procesando lote...</div>
+    <p style="font-size:0.88em;color:var(--muted);margin-bottom:4px" id="progress-label">Iniciando...</p>
+    <div class="progress-bar-wrap">
+      <div class="progress-bar" id="progress-bar"></div>
+    </div>
+    <div class="log-box" id="log-box"></div>
+  </div>
+
+  <!-- DONE -->
+  <div id="done-card">
+    <div class="done-icon">🎉</div>
+    <div class="done-title">¡Lote procesado!</div>
+    <div class="done-sub" id="done-sub">PDFs generados y correos enviados correctamente.</div>
+    <a href="#" class="download-btn" id="download-btn" download>
+      ⬇ Descargar ZIP con todos los archivos
+    </a>
+    <div class="errors-box" id="errors-box" style="display:none">
+      <div class="errors-title">⚠️ Advertencias</div>
+      <div id="errors-list"></div>
+    </div>
+    <div style="margin-top:24px">
+      <button class="btn btn-ghost" onclick="resetForm()" style="width:auto">Procesar otro lote</button>
+    </div>
+  </div>
+
+  <!-- ERROR -->
+  <div id="error-card">
+    <p>💥 <strong>Error:</strong> <span id="error-msg"></span></p>
+    <div style="margin-top:16px">
+      <button class="btn btn-ghost" onclick="resetForm()">Intentar de nuevo</button>
+    </div>
+  </div>
+
+</main>
+
+<footer>
+  <p>Elena NP · Desarrollado para <span>QPAlliance Legal Department</span></p>
+</footer>
+
+<script>
+  // ─── STATE ─────────────────────────────────────────────────────────────────
+  let currentStep = 1;
+  let jobId       = null;
+  let pollTimer   = null;
+  const uploadedFiles = { base: null, autos: [], demandas: [] };
+
+  const STEPS = 5;
+  const STEP_LABELS = ['', 'Procesando códigos', 'Cargando base de radicación',
+                       'Analizando autos', 'Fusionando demandas', 'Enviando correos'];
+
+  // ─── STEPPER ───────────────────────────────────────────────────────────────
+  function goStep(n) {
+    if (n === 2 && !validateStep1()) return;
+    if (n === 3 && !uploadedFiles.base) { alert('Por favor sube el archivo de base de radicación.'); return; }
+    if (n === 4 && !uploadedFiles.autos.length) { alert('Por favor sube al menos un auto admisorio.'); return; }
+    if (n === 5 && !uploadedFiles.demandas.length) { alert('Por favor sube al menos una demanda.'); return; }
+
+    document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
+    document.querySelector(`#step-${n}`).classList.add('active');
+
+    document.querySelectorAll('.step-item').forEach(s => {
+      const sn = parseInt(s.dataset.step);
+      s.classList.remove('active','done');
+      if (sn === n) s.classList.add('active');
+      else if (sn < n) s.classList.add('done');
+    });
+    currentStep = n;
+  }
+
+  // ─── STEP 1 VALIDATION ─────────────────────────────────────────────────────
+  document.getElementById('codes-input').addEventListener('input', function() {
+    const codes = parseCodes(this.value);
+    const hint  = document.getElementById('codes-count');
+    hint.textContent = codes.length > 0 ? `${codes.length} código(s) detectado(s): ${codes.join(', ')}` : 'Ingresa al menos un código';
+    hint.style.color = codes.length > 0 ? '#4ade80' : 'var(--muted)';
+    document.getElementById('btn-step1').disabled = codes.length === 0;
+  });
+
+  function parseCodes(raw) {
+    return raw.split(/[;,\n\s]+/).map(s => s.trim()).filter(s => /^\d+$/.test(s)).map(Number);
+  }
+
+  function validateStep1() {
+    const codes = parseCodes(document.getElementById('codes-input').value);
+    if (!codes.length) { alert('Ingresa al menos un código válido.'); return false; }
+    return true;
+  }
+
+  // ─── FILE HANDLERS ──────────────────────────────────────────────────────────
+  function handleFile(key, input) {
+    const f = input.files[0];
+    if (!f) return;
+    uploadedFiles[key] = f;
+    document.getElementById(`files-${key}`).innerHTML =
+      `<div class="file-tag">📊 ${f.name} <small>(${(f.size/1024).toFixed(0)} KB)</small></div>`;
+    document.getElementById(`btn-step${key==='base'?2:key==='autos'?3:4}`).disabled = false;
+  }
+
+  function handleFiles(key, input) {
+    const files = Array.from(input.files);
+    if (!files.length) return;
+    uploadedFiles[key] = files;
+    document.getElementById(`files-${key}`).innerHTML =
+      files.map(f => `<div class="file-tag">📄 ${f.name}</div>`).join('');
+    document.getElementById(`btn-step${key==='autos'?3:4}`).disabled = false;
+  }
+
+  // Drag & drop styling
+  document.querySelectorAll('.file-drop').forEach(el => {
+    el.addEventListener('dragover',  e => { e.preventDefault(); el.classList.add('dragover'); });
+    el.addEventListener('dragleave', ()  => el.classList.remove('dragover'));
+    el.addEventListener('drop',      e => {
+      e.preventDefault(); el.classList.remove('dragover');
+      const files = Array.from(e.dataTransfer.files);
+      const id = el.id.replace('drop-','');
+      if (id === 'base') {
+        if (files[0]) { uploadedFiles.base = files[0]; document.getElementById('files-base').innerHTML = `<div class="file-tag">📊 ${files[0].name}</div>`; document.getElementById('btn-step2').disabled=false; }
+      } else {
+        uploadedFiles[id] = files;
+        document.getElementById(`files-${id}`).innerHTML = files.map(f=>`<div class="file-tag">📄 ${f.name}</div>`).join('');
+        document.getElementById(`btn-step${id==='autos'?3:4}`).disabled = false;
+      }
+    });
+  });
+
+  // ─── STEP 5 EMAIL ───────────────────────────────────────────────────────────
+  function checkStep5() {
+    const val = document.getElementById('to-email').value.trim();
+    document.getElementById('btn-process').disabled = !val || !val.includes('@');
+  }
+  document.getElementById('to-email').addEventListener('input', checkStep5);
+
+  // ─── PROCESS ────────────────────────────────────────────────────────────────
+  async function startProcess() {
+    const codes    = parseCodes(document.getElementById('codes-input').value);
+    const toEmail  = document.getElementById('to-email').value.trim();
+    const ccEmail  = document.getElementById('cc-email').value.trim();
+    const sendFlag = document.getElementById('send-emails').checked;
+
+    // Hide all step cards
+    document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
+    document.getElementById('progress-card').classList.add('active');
+    document.getElementById('done-card').classList.remove('active');
+    document.getElementById('error-card').classList.remove('active');
+
+    // Build form data
+    const fd = new FormData();
+    fd.append('codes',        codes.join(';'));
+    fd.append('to_email',     toEmail);
+    fd.append('cc_email',     ccEmail);
+    fd.append('send_emails',  sendFlag ? 'true' : 'false');
+    fd.append('base_radicacion', uploadedFiles.base);
+    uploadedFiles.autos.forEach(f    => fd.append('autos',    f));
+    uploadedFiles.demandas.forEach(f => fd.append('demandas', f));
+
+    try {
+      const res  = await fetch('/process', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok) { showError(data.error || 'Error al iniciar el proceso'); return; }
+      jobId = data.job_id;
+      pollStatus();
+    } catch(e) {
+      showError('No se pudo conectar con el servidor: ' + e.message);
+    }
+  }
+
+  // ─── POLL ────────────────────────────────────────────────────────────────────
+  function pollStatus() {
+    pollTimer = setInterval(async () => {
+      try {
+        const res  = await fetch(`/status/${jobId}`);
+        const data = await res.json();
+        updateProgress(data);
+        if (data.status === 'done')  { clearInterval(pollTimer); showDone(data); }
+        if (data.status === 'error') { clearInterval(pollTimer); showError(data.error); }
+      } catch(e) { /* retry */ }
+    }, 1500);
+  }
+
+  function updateProgress(data) {
+    const step  = data.step || 0;
+    const pct   = Math.min(100, (step / 6) * 100);
+    document.getElementById('progress-bar').style.width = pct + '%';
+    document.getElementById('progress-label').textContent =
+      step > 0 ? STEP_LABELS[step] || 'Procesando...' : 'Iniciando...';
+
+    const logBox = document.getElementById('log-box');
+    const logs   = data.logs || [];
+    logBox.innerHTML = logs.map(l =>
+      `<div class="log-${l.level}"><span style="color:#444;margin-right:8px">${l.ts}</span>${escHtml(l.msg)}</div>`
+    ).join('');
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  function showDone(data) {
+    document.getElementById('progress-card').classList.remove('active');
+    const done = document.getElementById('done-card');
+    done.classList.add('active');
+    const count  = data.final_count || 0;
+    const errors = data.errors || [];
+    document.getElementById('done-sub').textContent =
+      `${count} PDF${count!==1?'s':''} generado${count!==1?'s':''}.` +
+      (errors.length ? ` ${errors.length} advertencia(s).` : ' Sin errores.');
+    const dlBtn = document.getElementById('download-btn');
+    dlBtn.href = `/download/${jobId}`;
+    if (errors.length) {
+      document.getElementById('errors-box').style.display = 'block';
+      document.getElementById('errors-list').innerHTML = errors.map(e => `<div>• ${escHtml(e)}</div>`).join('');
+    }
+  }
+
+  function showError(msg) {
+    document.getElementById('progress-card').classList.remove('active');
+    document.getElementById('error-card').classList.add('active');
+    document.getElementById('error-msg').textContent = msg;
+  }
+
+  // ─── RESET ───────────────────────────────────────────────────────────────────
+  function resetForm() {
+    if (pollTimer) clearInterval(pollTimer);
+    jobId = null;
+    uploadedFiles.base = null; uploadedFiles.autos = []; uploadedFiles.demandas = [];
+    document.getElementById('codes-input').value = '';
+    document.getElementById('to-email').value = '';
+    document.getElementById('cc-email').value = '';
+    document.getElementById('codes-count').textContent = 'Ingresa al menos un código';
+    document.getElementById('files-base').innerHTML = '';
+    document.getElementById('files-autos').innerHTML = '';
+    document.getElementById('files-demandas').innerHTML = '';
+    document.getElementById('errors-box').style.display = 'none';
+    document.getElementById('progress-card').classList.remove('active');
+    document.getElementById('done-card').classList.remove('active');
+    document.getElementById('error-card').classList.remove('active');
+    document.getElementById('btn-step2').disabled = true;
+    document.getElementById('btn-step3').disabled = true;
+    document.getElementById('btn-step4').disabled = true;
+    document.getElementById('btn-process').disabled = true;
+    goStep(1);
+  }
+
+  // ─── UTILS ───────────────────────────────────────────────────────────────────
+  function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+</script>
+</body>
+</html>
