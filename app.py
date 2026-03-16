@@ -257,33 +257,157 @@ def parse_codigos(raw: str) -> list:
             result.append(int(m.group(1)))
     return list(dict.fromkeys(result))  # deduplicate preserving order
 
+def extract_radicado_from_pdf(pdf_path: Path) -> str | None:
+    """Use Claude vision to extract the radicado number from a judicial PDF."""
+    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+    if not api_key:
+        return None
+    img_b64 = _pdf_page_to_base64(pdf_path, page_index=0)
+    if not img_b64:
+        return None
+    try:
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model='claude-haiku-4-5-20251001',
+            max_tokens=80,
+            messages=[{
+                'role': 'user',
+                'content': [
+                    {
+                        'type': 'image',
+                        'source': {'type': 'base64', 'media_type': 'image/png', 'data': img_b64},
+                    },
+                    {
+                        'type': 'text',
+                        'text': (
+                            'Este es un documento judicial colombiano. '
+                            'Extrae el número de radicado completo del proceso '
+                            '(secuencia larga de dígitos, a veces con guiones, '
+                            'aparece como "Radicado:", "Radicación No.", "Proceso No." o similar). '
+                            'Responde SOLO con los dígitos del radicado sin espacios ni guiones. '
+                            'Si no encuentras ninguno, responde: NO_RADICADO'
+                        ),
+                    },
+                ],
+            }],
+        )
+        raw = msg.content[0].text.strip()
+        if not raw or raw.upper() == 'NO_RADICADO':
+            return None
+        # Keep only digits
+        digits = re.sub(r'\D', '', raw)
+        return digits if len(digits) >= 6 else None
+    except Exception:
+        return None
+
+
+def build_code_pdf_map(pdf_paths: list, excel_data: dict,
+                       valid_codes: list, log_fn=None) -> dict:
+    """
+    Build a {code -> pdf_path} mapping in one pre-processing pass over all PDFs.
+
+    Priority 1: R{code} or code digits in filename (no API cost).
+    Priority 2: Claude vision reads the radicado from the PDF and matches
+                it against the Radicado column in excel_data.
+    Priority 3: Positional (sorted codes → sorted PDFs) for any unmatched remainder.
+
+    Returns dict[int, Path] — one entry per code that could be matched.
+    """
+    def _log(msg):
+        if log_fn:
+            log_fn(f"    [PDF-match] {msg}")
+
+    if not pdf_paths:
+        return {}
+
+    # Build radicado-digits → code lookup from Excel
+    radicado_to_code: dict[str, int] = {}
+    for code in valid_codes:
+        row = excel_data.get(code, {})
+        rad = re.sub(r'\D', '', str(row.get('Radicado', '')))
+        if len(rad) >= 6:
+            radicado_to_code[rad] = code
+
+    result: dict[int, Path] = {}      # code → pdf_path
+    unmatched_paths: list[Path] = []  # PDFs not yet matched
+
+    for pdf_path in pdf_paths:
+        matched_code = None
+
+        # ── P1: filename contains R{code} ─────────────────────────────────
+        for code in valid_codes:
+            if code in result:
+                continue
+            if re.search(r'[Rr]0*' + str(code) + r'[\W_\.]', pdf_path.name + '.'):
+                matched_code = code
+                _log(f"{pdf_path.name} → R{code} (nombre)")
+                break
+
+        # ── P1b: code digits anywhere in stem (unique match only) ─────────
+        if matched_code is None:
+            candidates = [
+                c for c in valid_codes
+                if c not in result and str(c) in re.sub(r'\D', '', pdf_path.stem)
+            ]
+            if len(candidates) == 1:
+                matched_code = candidates[0]
+                _log(f"{pdf_path.name} → R{matched_code} (dígitos en nombre)")
+
+        # ── P2: Claude vision radicado extraction ─────────────────────────
+        if matched_code is None and radicado_to_code:
+            rad_digits = extract_radicado_from_pdf(pdf_path)
+            if rad_digits:
+                # Exact match
+                matched_code = radicado_to_code.get(rad_digits)
+                # Suffix match (last 10+ digits) if exact fails
+                if matched_code is None:
+                    for rad_key, code in radicado_to_code.items():
+                        if code in result:
+                            continue
+                        n = min(len(rad_digits), len(rad_key))
+                        if n >= 8 and rad_digits[-n:] == rad_key[-n:]:
+                            matched_code = code
+                            break
+                if matched_code is not None:
+                    _log(f"{pdf_path.name} → R{matched_code} (radicado IA: {rad_digits})")
+                else:
+                    _log(f"{pdf_path.name}: radicado IA '{rad_digits}' no coincide — fallback posicional")
+            else:
+                _log(f"{pdf_path.name}: sin radicado de IA — fallback posicional")
+
+        if matched_code is not None:
+            result[matched_code] = pdf_path
+        else:
+            unmatched_paths.append(pdf_path)
+
+    # ── P3: positional for any remaining unmatched PDFs ───────────────────
+    unmatched_codes = sorted(c for c in valid_codes if c not in result)
+    if unmatched_paths and unmatched_codes:
+        _log(f"Posicional: {[p.name for p in unmatched_paths]} → {unmatched_codes}")
+        for code, path in zip(unmatched_codes, sorted(unmatched_paths, key=lambda p: p.name)):
+            result[code] = path
+            _log(f"  {path.name} → R{code} (posicional)")
+
+    return result
+
+
 def find_pdf_for_code(code: int, paths: list, all_codes: list = None) -> Path | None:
-    """
-    Find a PDF for a code using:
-      1. R{code} pattern in filename
-      2. Code digits anywhere in stem
-      3. Positional match: if N PDFs and N codes, match by index order
-    """
+    """Legacy single-lookup (kept for compatibility). Prefer build_code_pdf_map."""
     if not paths:
         return None
     code_str = str(code)
-    # Priority 1: R0*1372 pattern
     for p in paths:
         if re.search(r'[Rr]0*' + code_str + r'[\W_\.]', p.name + '.'):
             return p
-    # Priority 2: code digits anywhere in stem
     for p in paths:
         if code_str in re.sub(r'\D', '', p.stem):
             return p
-    # Priority 3: positional — if number of PDFs matches number of codes,
-    # map by index (sorted PDFs → sorted codes)
     if all_codes and len(paths) == len(all_codes):
         sorted_codes = sorted(all_codes)
         sorted_paths = sorted(paths, key=lambda p: p.name)
         if code in sorted_codes:
-            idx = sorted_codes.index(code)
-            return sorted_paths[idx]
-    # Priority 4: if only 1 PDF total, use it for any code
+            return sorted_paths[sorted_codes.index(code)]
     if len(paths) == 1:
         return paths[0]
     return None
@@ -890,22 +1014,25 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             job['error']  = f"Codigos {codigos} no encontrados. Primeros en Excel: {sample_keys}"
             return
 
-        # STEP 2 — Validate documents exist for each code
-        log("Validando documentos requeridos...", step=2)
+        # STEP 2 — Build PDF→code mappings and validate
+        log("Identificando y validando documentos...", step=2)
         log(f"  Autos subidos: {[p.name for p in autos_pdfs]}")
         log(f"  Demandas subidas: {[p.name for p in demandas_pdfs]}")
+
+        auto_map    = build_code_pdf_map(autos_pdfs,    excel_data, found, log_fn=log)
+        demanda_map = build_code_pdf_map(demandas_pdfs, excel_data, found, log_fn=log)
+
         valid_codes = []
         for code in found:
-            aa_pdf = find_pdf_for_code(code, autos_pdfs, found)
-            dm_pdf = find_pdf_for_code(code, demandas_pdfs, found)
             missing_docs = []
-            if not aa_pdf:
+            if code not in auto_map:
                 missing_docs.append('auto admisorio')
-            if not dm_pdf:
+            if code not in demanda_map:
                 missing_docs.append('demanda')
             if missing_docs:
                 log(f"  ERROR R{code}: Faltan documentos requeridos: {', '.join(missing_docs)}. Omitiendo.")
             else:
+                log(f"  R{code}: auto={auto_map[code].name} | demanda={demanda_map[code].name}")
                 valid_codes.append(code)
 
         if not valid_codes:
@@ -927,9 +1054,9 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             juzgado      = row.get('Juzgado', '')
             fecha_demanda = row.get('Fecha_Demanda', '')
 
-            # Locate uploaded PDFs (guaranteed to exist after validation)
-            auto_pdf    = find_pdf_for_code(code, autos_pdfs, valid_codes)
-            demanda_pdf = find_pdf_for_code(code, demandas_pdfs, valid_codes)
+            # Locate uploaded PDFs using pre-built mapping (guaranteed to exist)
+            auto_pdf    = auto_map[code]
+            demanda_pdf = demanda_map[code]
 
             # 3a. Extract fecha_admite from auto admisorio PDF
             fecha_admite_extracted = extract_fecha_admite_from_pdf(auto_pdf, log_fn=log)
