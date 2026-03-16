@@ -511,12 +511,18 @@ def merge_pdfs(pdf_list: list, output_path: Path):
         writer.write(f)
 
 def build_separator_page(output_path: Path, text: str = 'DEMANDA'):
-    """Build a single-page PDF with text centered at mid-page (Caladea Bold, auto-size)."""
+    """
+    Build a branded separator page: QPAlliance logo + title text (centered group)
+    + footer with address and website.
+    """
+    import base64, io
     from reportlab.lib.pagesizes import letter
     from reportlab.pdfgen import canvas
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.lib.utils import ImageReader
 
+    # ── Font ─────────────────────────────────────────────────────────────────
     CALADEA = '/usr/share/fonts/truetype/crosextra/Caladea-Bold.ttf'
     font_name = 'CalaDeaBold'
     try:
@@ -524,18 +530,77 @@ def build_separator_page(output_path: Path, text: str = 'DEMANDA'):
     except Exception:
         font_name = 'Helvetica-Bold'
 
+    # QPAlliance pink
+    QP_R, QP_G, QP_B = 0.831, 0.0, 0.416   # #D4006A
+
     w, h = letter
     c = canvas.Canvas(str(output_path), pagesize=letter)
 
-    # Auto-size: reduce font until text fits within margins (40pt each side)
-    font_size = 72
+    # ── Auto-size title ───────────────────────────────────────────────────────
+    font_size = 60
     c.setFont(font_name, font_size)
-    while font_size > 20 and c.stringWidth(text, font_name, font_size) > w - 80:
+    while font_size > 18 and c.stringWidth(text, font_name, font_size) > w - 80:
         font_size -= 4
         c.setFont(font_name, font_size)
-
     text_w = c.stringWidth(text, font_name, font_size)
-    c.drawString((w - text_w) / 2, h / 2, text)
+
+    # ── Logo ─────────────────────────────────────────────────────────────────
+    logo_img  = None
+    logo_w_pt = 0
+    logo_h_pt = 0
+    if _LOGO_B64:
+        try:
+            img_bytes  = base64.b64decode(_LOGO_B64)
+            logo_img   = ImageReader(io.BytesIO(img_bytes))
+            orig_w, orig_h = logo_img.getSize()
+            max_logo_w = 160.0          # max width in points
+            scale      = min(max_logo_w / orig_w, 80.0 / orig_h)   # also cap height
+            logo_w_pt  = orig_w * scale
+            logo_h_pt  = orig_h * scale
+        except Exception:
+            logo_img = None
+
+    # ── Vertical centering of the content group ───────────────────────────────
+    # Group layout (top → bottom): logo → gap → title
+    logo_gap   = 20   # pts between logo bottom and title top
+    group_h    = (logo_h_pt + logo_gap if logo_img else 0) + font_size
+    center_y   = h / 2 + 10   # slight upward bias
+
+    # Title baseline (text is drawn at baseline in reportlab)
+    title_y    = center_y - group_h / 2
+    # Logo bottom (logo sits above the title)
+    logo_y     = title_y + font_size + logo_gap
+    logo_x     = (w - logo_w_pt) / 2
+
+    # ── Draw logo ─────────────────────────────────────────────────────────────
+    if logo_img:
+        c.drawImage(logo_img, logo_x, logo_y,
+                    width=logo_w_pt, height=logo_h_pt, mask='auto')
+
+    # ── Draw title ────────────────────────────────────────────────────────────
+    c.setFont(font_name, font_size)
+    c.setFillColorRGB(QP_R, QP_G, QP_B)
+    c.drawString((w - text_w) / 2, title_y, text)
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    FOOT_FONT  = 'Helvetica'
+    FOOT_SIZE  = 7.5
+    c.setFont(FOOT_FONT, FOOT_SIZE)
+    c.setFillColorRGB(0.40, 0.40, 0.40)
+
+    addr1 = 'Avenida Calle 26 #68c-61, Oficinas 909 y 910, Edificio Torre Central, Bogotá'
+    addr2 = 'www.qpalliance.co'
+    a1w = c.stringWidth(addr1, FOOT_FONT, FOOT_SIZE)
+    a2w = c.stringWidth(addr2, FOOT_FONT, FOOT_SIZE)
+
+    # Thin line above footer
+    c.setStrokeColorRGB(QP_R, QP_G, QP_B)
+    c.setLineWidth(0.5)
+    c.line(40, 52, w - 40, 52)
+
+    c.drawString((w - a1w) / 2, 38, addr1)
+    c.drawString((w - a2w) / 2, 27, addr2)
+
     c.save()
 
 
