@@ -585,21 +585,22 @@ def build_separator_page(output_path: Path, text: str = 'DEMANDA'):
     # ── Footer ────────────────────────────────────────────────────────────────
     FOOT_FONT  = 'Helvetica'
     FOOT_SIZE  = 7.5
-    c.setFont(FOOT_FONT, FOOT_SIZE)
-    c.setFillColorRGB(0.40, 0.40, 0.40)
+    MARGIN     = 36   # left/right margin in pts
 
-    addr1 = 'Avenida Calle 26 #68c-61, Oficinas 909 y 910, Edificio Torre Central, Bogotá'
-    addr2 = 'www.qpalliance.co'
-    a1w = c.stringWidth(addr1, FOOT_FONT, FOOT_SIZE)
-    a2w = c.stringWidth(addr2, FOOT_FONT, FOOT_SIZE)
+    addr_left  = 'Av. Calle 26 #68C-61, Oficinas 909 y 910  \xb7  Edificio Torre Central  \xb7  Bogot\xe1, Colombia'
+    addr_right = 'www.qpalliance.co'
 
-    # Thin line above footer
+    # Full-width pink line — edge to edge
     c.setStrokeColorRGB(QP_R, QP_G, QP_B)
-    c.setLineWidth(0.5)
-    c.line(40, 52, w - 40, 52)
+    c.setLineWidth(1.0)
+    c.line(0, 46, w, 46)
 
-    c.drawString((w - a1w) / 2, 38, addr1)
-    c.drawString((w - a2w) / 2, 27, addr2)
+    # Footer text: left-aligned address, right-aligned URL
+    c.setFont(FOOT_FONT, FOOT_SIZE)
+    c.setFillColorRGB(0.45, 0.45, 0.45)
+    right_w = c.stringWidth(addr_right, FOOT_FONT, FOOT_SIZE)
+    c.drawString(MARGIN, 30, addr_left)
+    c.drawString(w - MARGIN - right_w, 30, addr_right)
 
     c.save()
 
