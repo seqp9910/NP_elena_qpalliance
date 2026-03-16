@@ -101,7 +101,7 @@ def _pdf_page_to_base64(pdf_path: Path, page_index: int = 0) -> str | None:
         return None
 
 
-def extract_fecha_admite_from_pdf(pdf_path: Path) -> str | None:
+def extract_fecha_admite_from_pdf(pdf_path: Path, log_fn=None) -> str | None:
     """
     Extract admission date from an auto admisorio PDF.
     Strategy 1 (primary): Claude vision API — reads the page as an image,
@@ -109,6 +109,10 @@ def extract_fecha_admite_from_pdf(pdf_path: Path) -> str | None:
     Strategy 2 (fallback): pdfplumber text extraction + regex.
     Returns e.g. '05 de enero de 2025' or None.
     """
+    def _log(msg):
+        if log_fn:
+            log_fn(f"    [AA] {msg}")
+
     MESES_RE = '(' + '|'.join(MESES_STR[1:]) + ')'
     DATE_WORD = r'\b(\d{1,2})\s+de\s+' + MESES_RE + r'\s+de\s+(\d{4})\b'
     DATE_NUM  = r'\b(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})\b'
@@ -123,15 +127,12 @@ def extract_fecha_admite_from_pdf(pdf_path: Path) -> str | None:
         return None
 
     def parse_date_str(raw: str) -> str | None:
-        """Try to parse a date string from the AI response."""
         raw = raw.strip()
         if not raw or raw.upper() == 'NO_FECHA':
             return None
-        # Already in word form: "15 de marzo de 2024"
         m = re.search(DATE_WORD, raw, re.IGNORECASE)
         if m:
             return to_letras_from_word(m)
-        # Numeric form: 15/03/2024 or 15-03-2024
         m = re.search(DATE_NUM, raw)
         if m:
             return to_letras_from_num(m)
@@ -139,9 +140,14 @@ def extract_fecha_admite_from_pdf(pdf_path: Path) -> str | None:
 
     # ── Strategy 1: Claude vision API ────────────────────────────────────────
     api_key = os.environ.get('ANTHROPIC_API_KEY', '')
-    if api_key:
+    if not api_key:
+        _log("ANTHROPIC_API_KEY no configurada — usando fallback regex")
+    else:
+        _log("Intentando extracción con Claude vision...")
         img_b64 = _pdf_page_to_base64(pdf_path, page_index=0)
-        if img_b64:
+        if not img_b64:
+            _log("No se pudo renderizar la página como imagen (pymupdf falló)")
+        else:
             try:
                 import anthropic as _anthropic
                 client = _anthropic.Anthropic(api_key=api_key)
@@ -173,11 +179,15 @@ def extract_fecha_admite_from_pdf(pdf_path: Path) -> str | None:
                     }],
                 )
                 raw_answer = msg.content[0].text.strip()
+                _log(f"Respuesta IA: '{raw_answer}'")
                 result = parse_date_str(raw_answer)
                 if result:
+                    _log(f"Fecha extraída por IA: {result}")
                     return result
-            except Exception:
-                pass   # fall through to strategy 2
+                else:
+                    _log("IA no devolvió fecha válida — usando fallback regex")
+            except Exception as _e:
+                _log(f"Error llamando Claude API: {_e} — usando fallback regex")
 
     # ── Strategy 2: pdfplumber text + regex (digital PDFs) ───────────────────
     try:
@@ -530,7 +540,7 @@ def build_separator_page(output_path: Path, text: str = 'DEMANDA'):
     except Exception:
         font_name = 'Helvetica-Bold'
 
-    # QPAlliance pink
+    # QPAlliance pink (for footer line only)
     QP_R, QP_G, QP_B = 0.831, 0.0, 0.416   # #D4006A
 
     w, h = letter
@@ -553,34 +563,33 @@ def build_separator_page(output_path: Path, text: str = 'DEMANDA'):
             img_bytes  = base64.b64decode(_LOGO_B64)
             logo_img   = ImageReader(io.BytesIO(img_bytes))
             orig_w, orig_h = logo_img.getSize()
-            max_logo_w = 160.0          # max width in points
-            scale      = min(max_logo_w / orig_w, 80.0 / orig_h)   # also cap height
+            max_logo_w = 160.0
+            scale      = min(max_logo_w / orig_w, 80.0 / orig_h)
             logo_w_pt  = orig_w * scale
             logo_h_pt  = orig_h * scale
         except Exception:
             logo_img = None
 
-    # ── Vertical centering of the content group ───────────────────────────────
-    # Group layout (top → bottom): logo → gap → title
-    logo_gap   = 20   # pts between logo bottom and title top
-    group_h    = (logo_h_pt + logo_gap if logo_img else 0) + font_size
-    center_y   = h / 2 + 10   # slight upward bias
+    # ── Vertical centering: title (top) → gap → logo (bottom) ────────────────
+    logo_gap = 24   # pts between title baseline and logo top
+    group_h  = font_size + (logo_gap + logo_h_pt if logo_img else 0)
+    center_y = h / 2 + 10   # slight upward bias
 
-    # Title baseline (text is drawn at baseline in reportlab)
-    title_y    = center_y - group_h / 2
-    # Logo bottom (logo sits above the title)
-    logo_y     = title_y + font_size + logo_gap
-    logo_x     = (w - logo_w_pt) / 2
+    # Title baseline sits at the TOP of the group
+    title_y  = center_y + group_h / 2 - font_size
+    # Logo sits BELOW the title
+    logo_y   = center_y - group_h / 2          # bottom of logo image
+    logo_x   = (w - logo_w_pt) / 2
 
-    # ── Draw logo ─────────────────────────────────────────────────────────────
+    # ── Draw title (BLACK) ────────────────────────────────────────────────────
+    c.setFont(font_name, font_size)
+    c.setFillColorRGB(0, 0, 0)                  # black
+    c.drawString((w - text_w) / 2, title_y, text)
+
+    # ── Draw logo below title ─────────────────────────────────────────────────
     if logo_img:
         c.drawImage(logo_img, logo_x, logo_y,
                     width=logo_w_pt, height=logo_h_pt, mask='auto')
-
-    # ── Draw title ────────────────────────────────────────────────────────────
-    c.setFont(font_name, font_size)
-    c.setFillColorRGB(QP_R, QP_G, QP_B)
-    c.drawString((w - text_w) / 2, title_y, text)
 
     # ── Footer ────────────────────────────────────────────────────────────────
     FOOT_FONT  = 'Helvetica'
@@ -923,7 +932,7 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             demanda_pdf = find_pdf_for_code(code, demandas_pdfs, valid_codes)
 
             # 3a. Extract fecha_admite from auto admisorio PDF
-            fecha_admite_extracted = extract_fecha_admite_from_pdf(auto_pdf)
+            fecha_admite_extracted = extract_fecha_admite_from_pdf(auto_pdf, log_fn=log)
             no_date_mode = (fecha_admite_extracted is None)
             if fecha_admite_extracted:
                 log(f"  Fecha admisión R{code}: {fecha_admite_extracted}")
