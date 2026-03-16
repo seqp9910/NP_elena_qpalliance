@@ -23,12 +23,102 @@ BREVO_API_KEY = os.environ.get('BREVO_API_KEY', '')
 SENDER_NAME   = 'Notificaciones Judiciales - QPAlliance'
 SENDER_EMAIL  = 'notificacionesjudiciales@qpalliance.co'
 
+# Load logo base64 once at startup
+_LOGO_B64 = ''
+try:
+    _LOGO_B64 = (ASSETS_DIR / 'logo_b64.txt').read_text().strip()
+except Exception:
+    pass
+
 # ─── UTILS ───────────────────────────────────────────────────────────────────
 def hoy_str():
     m = ['','enero','febrero','marzo','abril','mayo','junio',
          'julio','agosto','septiembre','octubre','noviembre','diciembre']
     t = datetime.date.today()
     return f"{t.day:02d} de {m[t.month]} de {t.year}"
+
+MESES_STR = ['', 'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+             'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre']
+MESES_MAP  = {m: i for i, m in enumerate(MESES_STR) if m}
+
+def fecha_a_letras(fecha_str: str) -> str:
+    """Convert date string to Spanish letters: '05 de enero de 2025'."""
+    if not fecha_str:
+        return fecha_str
+    s = str(fecha_str).strip()
+    # Already in letter format?
+    if re.search(r'\bde\s+(' + '|'.join(MESES_STR[1:]) + r')\b', s, re.I):
+        return s
+    # dd/mm/yyyy or dd-mm-yyyy
+    m = re.match(r'^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$', s)
+    if m:
+        day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= month <= 12:
+            return f"{day:02d} de {MESES_STR[month]} de {year}"
+    return s
+
+def parse_fecha(s) -> datetime.date | None:
+    """Parse a date from string or date/datetime object. Returns datetime.date or None."""
+    if isinstance(s, datetime.datetime):
+        return s.date()
+    if isinstance(s, datetime.date):
+        return s
+    s = str(s).strip()
+    # dd de mes de yyyy
+    m = re.match(r'(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})', s, re.I)
+    if m:
+        d, mes, y = int(m.group(1)), m.group(2).lower(), int(m.group(3))
+        month = MESES_MAP.get(mes)
+        if month:
+            try:
+                return datetime.date(y, month, d)
+            except Exception:
+                pass
+    # dd/mm/yyyy or dd-mm-yyyy
+    m = re.match(r'(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})', s)
+    if m:
+        try:
+            return datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except Exception:
+            pass
+    return None
+
+def extract_fecha_admite_from_pdf(pdf_path: Path) -> str | None:
+    """
+    Try to extract the admission date from an auto admisorio PDF.
+    Returns date as '05 de enero de 2025' or None if not found.
+    Tries pdfplumber text extraction first (handles digital PDFs).
+    """
+    MESES_RE = '(' + '|'.join(MESES_STR[1:]) + ')'
+    try:
+        import pdfplumber
+        text = ''
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for page in pdf.pages[:5]:
+                t = page.extract_text()
+                if t:
+                    text += t + '\n'
+    except Exception:
+        return None
+
+    if not text.strip():
+        return None
+
+    # Pattern 1: dd de mes de yyyy
+    m = re.search(r'\b(\d{1,2})\s+de\s+' + MESES_RE + r'\s+de\s+(\d{4})\b',
+                  text, re.IGNORECASE)
+    if m:
+        day, month_str, year = int(m.group(1)), m.group(2).lower(), int(m.group(3))
+        return f"{day:02d} de {month_str} de {year}"
+
+    # Pattern 2: dd/mm/yyyy or dd-mm-yyyy
+    m = re.search(r'\b(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})\b', text)
+    if m:
+        day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return f"{day:02d} de {MESES_STR[month]} de {year}"
+
+    return None
 
 def normalizar(s: str) -> str:
     """Lowercase + strip accents."""
@@ -70,18 +160,12 @@ def find_pdf_for_code(code: int, paths: list) -> Path | None:
 def load_excel(excel_path: Path) -> dict:
     """
     Load the NP base Excel file.
-    Supports 'Nueva base radicacion de demandas.xlsx' which has 3 sheets:
-      Numeros, Listas, Total
-    Reads the 'Total' sheet (or first sheet if not found).
-    Columns expected: Cod, #, Abog, Nombre, Ciudad, Juzgado, Radicado,
-                      Fecha_Demanda, Tipo de proceso, Jurisdiccion, etc.
-    Returns dict: {code_int: {'Nombre':..., 'Radicado':..., 'Ciudad':...,
-                               'Juzgado':..., 'fecha_admite':...}}
+    Returns dict: {code_int: {'Nombre', 'Radicado', 'Ciudad', 'Juzgado',
+                               'Fecha_Demanda', 'email'}}
     """
     import pandas as pd
     import openpyxl
 
-    # 1. Detect sheet names
     try:
         wb = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
         sheets = wb.sheetnames
@@ -89,25 +173,20 @@ def load_excel(excel_path: Path) -> dict:
     except Exception:
         sheets = []
 
-    # 2. Prefer 'Total' sheet, then first
     if 'Total' in sheets:
         sheet_name = 'Total'
     elif sheets:
         sheet_name = sheets[0]
     else:
-        sheet_name = 0  # pandas default
+        sheet_name = 0
 
-    # 3. Read
     df = pd.read_excel(excel_path, sheet_name=sheet_name, header=0)
 
-    # 4. Normalize column names for mapping
-    # Priority for num column: '#' exact > 'numero'/'num' > 'cod'/'codigo'
     col_map = {}
     for col in df.columns:
         norm = normalizar(str(col))
-        # '#' gets highest priority as the sequential case number
         if norm == '#':
-            col_map['num'] = col          # override always — '#' wins
+            col_map['num'] = col
         elif norm in ('num', 'numero', 'n', 'no') and 'num' not in col_map:
             col_map['num'] = col
         elif norm in ('cod', 'codigo') and 'num' not in col_map:
@@ -120,24 +199,20 @@ def load_excel(excel_path: Path) -> dict:
             col_map.setdefault('ciudad', col)
         elif 'juzgado' in norm:
             col_map.setdefault('juzgado', col)
-        elif 'fecha' in norm and 'admite' in norm:
-            col_map['fecha_admite'] = col      # prefer fecha_admite over fecha_demanda
         elif 'fecha' in norm and 'demanda' in norm:
-            col_map.setdefault('fecha_admite', col)
+            col_map.setdefault('fecha_demanda', col)
         elif 'correo' in norm or 'email' in norm or 'electroni' in norm or 'direcc' in norm:
             col_map.setdefault('email', col)
 
-    # 5. Build lookup dict
     result = {}
     num_col = col_map.get('num')
     if num_col is None:
-        # Last resort: try '#' directly
         if '#' in df.columns:
             num_col = '#'
         else:
             raise ValueError(
-                f"No se encontro columna de codigo en hoja '{sheet_name}'. "
-                f"Columnas disponibles: {list(df.columns)}"
+                f"No se encontro columna de codigo. "
+                f"Columnas: {list(df.columns)}"
             )
 
     for _, row in df.iterrows():
@@ -145,7 +220,6 @@ def load_excel(excel_path: Path) -> dict:
             raw_code = row[num_col]
             if pd.isna(raw_code):
                 continue
-            # Accept integer or string like 'R1372'
             code_str = str(raw_code).strip()
             m = re.match(r'^[Rr]?(\d+)', code_str)
             if not m:
@@ -153,20 +227,6 @@ def load_excel(excel_path: Path) -> dict:
             code = int(m.group(1))
         except Exception:
             continue
-
-        # fecha_admite
-        fa_col = col_map.get('fecha_admite')
-        fa_raw = row.get(fa_col) if fa_col else None
-        if fa_raw is not None and not (isinstance(fa_raw, float) and pd.isna(fa_raw)):
-            try:
-                if isinstance(fa_raw, (datetime.datetime, datetime.date)):
-                    fecha_admite = fa_raw.strftime('%d/%m/%Y')
-                else:
-                    fecha_admite = str(fa_raw).strip()
-            except Exception:
-                fecha_admite = str(fa_raw).strip()
-        else:
-            fecha_admite = ''
 
         def get_col(key, default=''):
             col = col_map.get(key)
@@ -177,13 +237,27 @@ def load_excel(excel_path: Path) -> dict:
                 return default
             return str(val).strip()
 
+        # Fecha_Demanda: convert to legible string
+        fd_col = col_map.get('fecha_demanda')
+        fd_raw = row.get(fd_col) if fd_col else None
+        if fd_raw is not None and not (isinstance(fd_raw, float) and pd.isna(fd_raw)):
+            try:
+                if isinstance(fd_raw, (datetime.datetime, datetime.date)):
+                    fecha_demanda = fecha_a_letras(fd_raw.strftime('%d/%m/%Y'))
+                else:
+                    fecha_demanda = fecha_a_letras(str(fd_raw).strip())
+            except Exception:
+                fecha_demanda = str(fd_raw).strip()
+        else:
+            fecha_demanda = ''
+
         result[code] = {
-            'Nombre':       get_col('nombre'),
-            'Radicado':     get_col('radicado'),
-            'Ciudad':       get_col('ciudad'),
-            'Juzgado':      get_col('juzgado'),
-            'fecha_admite': fecha_admite,
-            'email':        get_col('email'),
+            'Nombre':        get_col('nombre'),
+            'Radicado':      get_col('radicado'),
+            'Ciudad':        get_col('ciudad'),
+            'Juzgado':       get_col('juzgado'),
+            'Fecha_Demanda': fecha_demanda,
+            'email':         get_col('email'),
         }
 
     return result
@@ -194,10 +268,11 @@ def _fix_split_placeholders(xml_text: str, replacements: dict) -> str:
       run1: <w:t>{ or ' {'</w:t>
       run2: <w:t>FieldName</w:t>
       run3: <w:t>}</w:t>
-    Strategy: find field name alone in w:t, locate surrounding { and } runs,
-    replace w:t contents: first run → value, field run → empty, } run → empty.
+    Preserves any leading space before the { in the first run.
     """
     for field, value in replacements.items():
+        if str(field).startswith('__'):
+            continue  # Skip internal flags
         safe_val = str(value).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
         # Pass 1: simple single-run replacements
@@ -209,7 +284,6 @@ def _fix_split_placeholders(xml_text: str, replacements: dict) -> str:
         for m_field in list(re.finditer(field_pat, xml_text)):
             pos = m_field.start()
 
-            # Search backwards (up to 1500 chars) for opening { in a w:t
             before = xml_text[max(0, pos-1500):pos]
             opens = list(re.finditer(r'<w:t(?:\s[^>]*)?>[ ]?\{</w:t>', before))
             if not opens:
@@ -218,7 +292,6 @@ def _fix_split_placeholders(xml_text: str, replacements: dict) -> str:
             open_abs_start = max(0, pos-1500) + last_open.start()
             open_abs_end   = max(0, pos-1500) + last_open.end()
 
-            # Search forward (up to 500 chars) for closing } in a w:t
             after = xml_text[m_field.end():m_field.end()+500]
             m_close = re.search(r'<w:t(?:\s[^>]*)?>}</w:t>', after)
             if not m_close:
@@ -226,29 +299,38 @@ def _fix_split_placeholders(xml_text: str, replacements: dict) -> str:
             close_abs_start = m_field.end() + m_close.start()
             close_abs_end   = m_field.end() + m_close.end()
 
-            # Replace w:t content in each of the 3 runs
-            def repl_open(m, val=safe_val):
-                return m.group(1) + val + m.group(2)
-            def repl_empty(m):
-                return m.group(1) + m.group(2)
-
-            new_open  = re.sub(r'(<w:t[^>]*>)[ ]?\{(</w:t>)', repl_open,
-                               xml_text[open_abs_start:open_abs_end])
-            new_field = re.sub(r'(<w:t[^>]*>)' + re.escape(field) + r'(</w:t>)',
-                               repl_empty, xml_text[m_field.start():m_field.end()])
-            new_close = re.sub(r'(<w:t[^>]*>)}(</w:t>)', repl_empty,
-                               xml_text[close_abs_start:close_abs_end])
+            # Preserve leading space before { when replacing
+            new_open = re.sub(
+                r'(<w:t[^>]*>)([ ]?)\{(</w:t>)',
+                lambda m, val=safe_val: m.group(1) + m.group(2) + val + m.group(3),
+                xml_text[open_abs_start:open_abs_end]
+            )
+            new_field = re.sub(
+                r'(<w:t[^>]*>)' + re.escape(field) + r'(</w:t>)',
+                lambda m: m.group(1) + m.group(2),
+                xml_text[m_field.start():m_field.end()]
+            )
+            new_close = re.sub(
+                r'(<w:t[^>]*>)}(</w:t>)',
+                lambda m: m.group(1) + m.group(2),
+                xml_text[close_abs_start:close_abs_end]
+            )
 
             xml_text = (xml_text[:open_abs_start] + new_open +
                         xml_text[open_abs_end:m_field.start()] + new_field +
                         xml_text[m_field.end():close_abs_start] + new_close +
                         xml_text[close_abs_end:])
-            break  # one replacement per field per call
+            break
     return xml_text
 
 
-def fill_template(template_path: Path, data: dict, output_path: Path):
-    """Replace {placeholder} in DOCX template (handles split-run XML) and save."""
+def fill_template(template_path: Path, data: dict, output_path: Path,
+                  no_date_mode: bool = False):
+    """
+    Replace {placeholder} in DOCX template (handles split-run XML) and save.
+    If no_date_mode=True, replaces the 'adiado {fecha_admite}' segment with
+    '-y que aquí se adjunta-' (alternate paragraph when date not found).
+    """
     import shutil as _shutil
     import zipfile as _zipfile
 
@@ -260,10 +342,18 @@ def fill_template(template_path: Path, data: dict, output_path: Path):
 
     all_data = dict(data)
     all_data['fecha_de_hoy'] = hoy_str()
+    if no_date_mode:
+        all_data['fecha_admite'] = '__NOFECHA__'
 
     def replace_in_xml(xml_bytes: bytes) -> bytes:
         text = xml_bytes.decode('utf-8')
         text = _fix_split_placeholders(text, all_data)
+        if no_date_mode:
+            # Remove ', adiado ' from the run that precedes {fecha_admite}
+            text = text.replace('demanda, adiado </w:t>', 'demanda</w:t>')
+            text = text.replace('demanda, adiado</w:t>', 'demanda</w:t>')
+            # Replace the dummy token with alternate clause
+            text = text.replace('__NOFECHA__', '-y que aqu\u00ed se adjunta-')
         return text.encode('utf-8')
 
     xml_files = [n for n in names if n.endswith('.xml') or n.endswith('.rels')]
@@ -377,7 +467,6 @@ def build_email_proof_pdf(output_path: Path, code: int, client: dict,
     elements.append(Spacer(1, 6))
     elements.append(Paragraph('Cuerpo del correo:', label_style))
     elements.append(Spacer(1, 4))
-    # Render email body as plain text (strip any HTML tags)
     plain_body = re.sub(r'<[^>]+>', '', email_body_text).strip()
     for line in plain_body.split('\n'):
         line = line.strip()
@@ -390,6 +479,138 @@ def build_email_proof_pdf(output_path: Path, code: int, client: dict,
         ParagraphStyle('Footer', parent=styles['Normal'],
                        fontSize=8, textColor=colors.grey)))
     doc.build(elements)
+
+
+def build_email_signature() -> str:
+    """Build HTML email signature with QPAlliance logo."""
+    logo_img = (
+        f'<img src="data:image/png;base64,{_LOGO_B64}" '
+        f'style="width:90px;height:auto;display:block;" alt="QPAlliance">'
+    ) if _LOGO_B64 else '<strong style="color:#D4006A;font-size:16px">qpa</strong>'
+
+    return f"""<br><br>
+<hr style="border:none;border-top:2px solid #D4006A;margin:20px 0;max-width:420px">
+<table cellpadding="0" cellspacing="0" style="font-family:Arial,sans-serif;font-size:13px;color:#333">
+  <tr>
+    <td style="padding-right:14px;vertical-align:middle">{logo_img}</td>
+    <td style="vertical-align:middle;padding-left:14px;border-left:3px solid #D4006A;line-height:1.6">
+      <strong style="font-size:14px;color:#222">Legal Department | QPAlliance</strong><br>
+      <span style="color:#666">www.qpalliance.co</span><br>
+      <span style="color:#666">notificacionesjudiciales@qpalliance.co</span>
+    </td>
+  </tr>
+</table>"""
+
+
+def send_email_brevo(to_email: str, to_name: str, subject: str,
+                     html_body: str, attachment_paths: list = None):
+    """Send email via Brevo transactional API with multiple attachments and signature."""
+    import urllib.request
+    if not BREVO_API_KEY:
+        return False, "BREVO_API_KEY no configurada"
+
+    full_body = html_body + build_email_signature()
+
+    payload = {
+        "sender":  {"name": SENDER_NAME, "email": SENDER_EMAIL},
+        "to":      [{"email": to_email, "name": to_name}],
+        "subject": subject,
+        "htmlContent": full_body,
+    }
+
+    attachments = []
+    for att_path in (attachment_paths or []):
+        if att_path is None:
+            continue
+        p = Path(att_path)
+        if p.exists() and p.stat().st_size > 0:
+            with open(p, 'rb') as f:
+                content_b64 = base64.b64encode(f.read()).decode()
+            attachments.append({"content": content_b64, "name": p.name})
+    if attachments:
+        payload["attachment"] = attachments
+
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(
+        'https://api.brevo.com/v3/smtp/email',
+        data=data,
+        headers={
+            'Content-Type': 'application/json',
+            'api-key': BREVO_API_KEY,
+        },
+        method='POST'
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return True, resp.read().decode()
+    except Exception as e:
+        return False, str(e)
+
+
+def build_output_excel(cases_info: list, output_path: Path):
+    """Build Excel output with processing metrics per case."""
+    import openpyxl
+    from openpyxl.styles import PatternFill, Font, Alignment
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Lote NP"
+
+    headers = [
+        'Código', 'Nombre', 'Radicado', 'Ciudad',
+        'Fecha Radicación Demanda', 'Fecha Admite', 'Resta (días)',
+        'Procesó AA', 'Enviado'
+    ]
+
+    pink = PatternFill("solid", fgColor="D4006A")
+    white_bold = Font(color="FFFFFF", bold=True)
+    center = Alignment(horizontal='center')
+
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.fill = pink
+        cell.font = white_bold
+        cell.alignment = center
+
+    for i, case in enumerate(cases_info, 2):
+        fecha_dem = case.get('Fecha_Demanda', '')
+        fecha_adm = case.get('fecha_admite_extracted', '')
+
+        resta = ''
+        if fecha_dem and fecha_adm:
+            try:
+                d1 = parse_fecha(fecha_dem)
+                d2 = parse_fecha(fecha_adm)
+                if d1 and d2:
+                    resta = abs((d2 - d1).days)
+            except Exception:
+                resta = ''
+
+        row_data = [
+            f"R{case.get('code', '')}",
+            case.get('Nombre', ''),
+            case.get('Radicado', ''),
+            case.get('Ciudad', ''),
+            str(fecha_dem),
+            str(fecha_adm) if fecha_adm else '',
+            resta,
+            '✓' if case.get('procesó_aa') else '✗',
+            '✓' if case.get('enviado') else '✗',
+        ]
+
+        for col, value in enumerate(row_data, 1):
+            cell = ws.cell(row=i, column=col, value=value)
+            cell.alignment = Alignment(horizontal='center' if col in (1, 7, 8, 9) else 'left')
+            if col == 8:
+                cell.font = Font(color='006600' if case.get('procesó_aa') else 'CC0000', bold=True)
+            elif col == 9:
+                cell.font = Font(color='006600' if case.get('enviado') else 'CC0000', bold=True)
+
+    for col in ws.columns:
+        max_len = max((len(str(cell.value or '')) for cell in col), default=10)
+        ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 45)
+
+    wb.save(str(output_path))
 
 
 def build_receipt_pdf(codes_data: list, output_path: Path):
@@ -433,44 +654,6 @@ def build_receipt_pdf(codes_data: list, output_path: Path):
     elements.append(table)
     doc.build(elements)
 
-def send_email_brevo(to_email: str, to_name: str, subject: str,
-                     html_body: str, attachment_path: Path = None):
-    """Send email via Brevo transactional API."""
-    import urllib.request
-    if not BREVO_API_KEY:
-        return False, "BREVO_API_KEY no configurada"
-
-    payload = {
-        "sender":  {"name": SENDER_NAME, "email": SENDER_EMAIL},
-        "to":      [{"email": to_email, "name": to_name}],
-        "subject": subject,
-        "htmlContent": html_body,
-    }
-
-    if attachment_path and attachment_path.exists():
-        with open(attachment_path, 'rb') as f:
-            content_b64 = base64.b64encode(f.read()).decode()
-        payload["attachment"] = [{
-            "content": content_b64,
-            "name": attachment_path.name,
-        }]
-
-    data = json.dumps(payload).encode('utf-8')
-    req = urllib.request.Request(
-        'https://api.brevo.com/v3/smtp/email',
-        data=data,
-        headers={
-            'Content-Type': 'application/json',
-            'api-key': BREVO_API_KEY,
-        },
-        method='POST'
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return True, resp.read().decode()
-    except Exception as e:
-        return False, str(e)
-
 # ─── JOB RUNNER ──────────────────────────────────────────────────────────────
 def run_job(job_id: str, job_dir: Path, codigos: list,
             excel_path: Path, autos_pdfs: list, demandas_pdfs: list,
@@ -492,56 +675,88 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
         log("Cargando base de datos Excel...", step=1)
         excel_data = load_excel(excel_path)
         sample_keys = list(excel_data.keys())[:5]
-        log(f"   OK: {len(excel_data)} registros cargados. Primeros codigos: {sample_keys}")
-        log(f"   Codigos solicitados: {codigos}")
+        log(f"OK: {len(excel_data)} registros cargados. Primeros codigos: {sample_keys}")
+        log(f"Codigos solicitados: {codigos}")
 
-        # Verify all requested codes exist
         found    = [c for c in codigos if c in excel_data]
         missing  = [c for c in codigos if c not in excel_data]
-        log(f"   Encontrados: {found} | No encontrados: {missing}")
+        log(f"Encontrados: {found} | No encontrados: {missing}")
         if not found:
-            log("   ERROR: Ninguno de los codigos solicitados existe en el Excel. "
-                "Verifica que estas subiendo la hoja 'Total' y usando los numeros de la columna '#'.")
+            log("ERROR: Ninguno de los codigos existe en el Excel.")
             job['status'] = 'error'
             job['error']  = f"Codigos {codigos} no encontrados. Primeros en Excel: {sample_keys}"
             return
 
-        # STEP 2 — Generate NP, send email, build proof, assemble final PDF per client
-        log("Generando notificaciones personales...", step=2)
+        # STEP 2 — Validate documents exist for each code
+        log("Validando documentos requeridos...", step=2)
+        valid_codes = []
+        for code in found:
+            aa_pdf = find_pdf_for_code(code, autos_pdfs)
+            dm_pdf = find_pdf_for_code(code, demandas_pdfs)
+            missing_docs = []
+            if not aa_pdf:
+                missing_docs.append('auto admisorio')
+            if not dm_pdf:
+                missing_docs.append('demanda')
+            if missing_docs:
+                log(f"  ERROR R{code}: Faltan documentos requeridos: {', '.join(missing_docs)}. Omitiendo.")
+            else:
+                valid_codes.append(code)
+
+        if not valid_codes:
+            job['status'] = 'error'
+            job['error']  = "Ningún código tiene todos los documentos requeridos (auto admisorio + demanda)."
+            log("ERROR: No hay codigos validos con todos los documentos.")
+            return
+
+        # STEP 3 — Generate NP, send email, build proof, assemble final PDF per client
+        log("Generando notificaciones personales...", step=3)
         cases_info = []
         paquetes   = []
 
-        for code in codigos:
-            if code not in excel_data:
-                log(f"   Codigo {code} no encontrado en Excel, omitiendo.")
-                continue
-
+        for code in valid_codes:
             row          = excel_data[code]
             nombre       = row.get('Nombre', '')
             radicado     = row.get('Radicado', '')
             ciudad       = row.get('Ciudad', '')
             juzgado      = row.get('Juzgado', '')
-            fecha_admite = row.get('fecha_admite', '')
+            fecha_demanda = row.get('Fecha_Demanda', '')
 
-            # 2a. Fill NP template → DOCX → PDF
+            # Locate uploaded PDFs (guaranteed to exist after validation)
+            auto_pdf    = find_pdf_for_code(code, autos_pdfs)
+            demanda_pdf = find_pdf_for_code(code, demandas_pdfs)
+
+            # 3a. Extract fecha_admite from auto admisorio PDF
+            fecha_admite_extracted = extract_fecha_admite_from_pdf(auto_pdf)
+            no_date_mode = (fecha_admite_extracted is None)
+            if fecha_admite_extracted:
+                log(f"  Fecha admisión R{code}: {fecha_admite_extracted}")
+            else:
+                log(f"  No se pudo extraer fecha admisión de R{code} PDF — modo sin fecha")
+
+            procesó_aa = (fecha_admite_extracted is not None)
+
+            # 3b. Fill NP template → DOCX → PDF
             fill_data = {
                 'Nombre':       nombre,
                 'Radicado':     radicado,
                 'Ciudad':       ciudad,
                 'Juzgado':      juzgado,
-                'fecha_admite': fecha_admite,
+                'fecha_admite': fecha_admite_extracted or '',
             }
             docx_out = job_dir / f"auto_{code}.docx"
             np_pdf   = None
             try:
-                fill_template(template_path, fill_data, docx_out)
+                fill_template(template_path, fill_data, docx_out,
+                              no_date_mode=no_date_mode)
                 np_pdf = docx_to_pdf(docx_out, job_dir)
-                log(f"   OK NP generada: R{code} - {nombre}")
+                log(f"  OK NP generada: R{code} - {nombre}")
             except Exception as e:
-                log(f"   Error generando NP R{code}: {e}")
+                log(f"  Error generando NP R{code}: {e}")
 
-            # 2b. Build legal email body
-            email_subject = (f"R{code} Notificación personal - {radicado} - {nombre}")
+            # 3c. Build legal email body
+            fecha_admite_display = fecha_admite_extracted or '(fecha pendiente)'
+            email_subject = f"R{code} Notificación personal - {radicado} - {nombre}"
             email_body = (
                 f"<p>Señores,<br>Rappi S.A.S.<br>Felipe Villamarín Lafaurie</p>"
                 f"<p><strong>RADICADO:</strong> {radicado}<br>"
@@ -551,7 +766,7 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
                 f"demanda ordinaria laboral de primera instancia.</p>"
                 f"<p>Reciban un cordial saludo. De manera atenta, conforme lo dispuesto "
                 f"por el artículo 8 de la Ley 2213 de 2022, nos permitimos notificarle "
-                f"el auto del {fecha_admite}, por medio del cual se admite la demanda "
+                f"el auto del {fecha_admite_display}, por medio del cual se admite la demanda "
                 f"que impetra nuestro cliente, {nombre}. A la presente se adjunta:</p>"
                 f"<ol>"
                 f"<li>Auto admisorio de la demanda.</li>"
@@ -567,40 +782,52 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
                 f"</ol>"
             )
 
-            # 2c. Send individual email with NP PDF attached
+            # 3d. Build DEMANDA separator page
+            sep_pdf = job_dir / f"sep_{code}.pdf"
+            try:
+                build_separator_page(sep_pdf, 'DEMANDA')
+            except Exception as e:
+                log(f"  Error separador R{code}: {e}")
+                sep_pdf = None
+
+            # 3e. Build email demanda attachment: separator + demanda merged
+            email_demanda_pdf = None
+            if sep_pdf and sep_pdf.exists() and demanda_pdf:
+                email_demanda_pdf = job_dir / f"demanda_att_{code}.pdf"
+                try:
+                    merge_pdfs([sep_pdf, demanda_pdf], email_demanda_pdf)
+                except Exception as e:
+                    log(f"  Error merging demanda attachment R{code}: {e}")
+                    email_demanda_pdf = None
+
+            # 3f. Send individual email with 3 attachments:
+            #     1) NP PDF, 2) Auto admisorio PDF, 3) Separator+Demanda PDF
             sent_ok  = False
             sent_msg = 'BREVO_API_KEY no configurada'
             if dest_email and BREVO_API_KEY:
-                log(f"   Enviando correo R{code} → {dest_email}...")
-                attach = np_pdf if (np_pdf and np_pdf.exists()) else None
+                log(f"  Enviando correo R{code} → {dest_email}...")
+                attachments = [
+                    np_pdf if (np_pdf and np_pdf.exists()) else None,
+                    auto_pdf,
+                    email_demanda_pdf,
+                ]
                 sent_ok, sent_msg = send_email_brevo(
-                    dest_email, dest_email, email_subject, email_body, attach)
-                log(f"   {'OK correo enviado' if sent_ok else 'Error correo'} R{code}: {sent_msg[:80]}")
+                    dest_email, dest_email, email_subject, email_body, attachments)
+                log(f"  {'OK correo enviado' if sent_ok else 'Error correo'} R{code}: {sent_msg[:80]}")
             else:
-                log(f"   Email no enviado R{code} (BREVO_API_KEY no configurada)")
+                log(f"  Email no enviado R{code} (BREVO_API_KEY no configurada)")
 
-            # 2d. Build email proof page
+            # 3g. Build email proof page
             proof_pdf = job_dir / f"proof_{code}.pdf"
             try:
                 build_email_proof_pdf(proof_pdf, code, row,
                                       dest_email or '(sin destinatario)',
                                       sent_ok, sent_msg, email_subject, email_body)
             except Exception as e:
-                log(f"   Error constancia correo R{code}: {e}")
+                log(f"  Error constancia correo R{code}: {e}")
                 proof_pdf = None
 
-            # 2e. Build DEMANDA separator page
-            sep_pdf = job_dir / f"sep_{code}.pdf"
-            try:
-                build_separator_page(sep_pdf, 'DEMANDA')
-            except Exception as e:
-                log(f"   Error separador R{code}: {e}")
-                sep_pdf = None
-
-            # 2f. Locate uploaded demanda PDF
-            demanda_pdf = find_pdf_for_code(code, demandas_pdfs)
-
-            # 2g. Merge final PDF: NP → email proof → DEMANDA separator → demanda
+            # 3h. Merge final output PDF: NP → email proof → DEMANDA separator → demanda
             parts = []
             if np_pdf and np_pdf.exists():
                 parts.append(np_pdf)
@@ -616,40 +843,60 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
                 try:
                     merge_pdfs(parts, paquete_path)
                     paquetes.append(paquete_path)
-                    log(f"   OK R{code}.DDD.NP.done.pdf ({len(parts)} partes)")
+                    log(f"  OK R{code}.DDD.NP.done.pdf ({len(parts)} partes)")
                 except Exception as e:
-                    log(f"   Error ensamblando R{code}: {e}")
+                    log(f"  Error ensamblando R{code}: {e}")
             else:
-                log(f"   Sin partes para R{code}, omitiendo.")
+                log(f"  Sin partes para R{code}, omitiendo.")
 
-            cases_info.append({'code': code, **row})
+            cases_info.append({
+                'code':               code,
+                'Nombre':             nombre,
+                'Radicado':           radicado,
+                'Ciudad':             ciudad,
+                'Juzgado':            juzgado,
+                'Fecha_Demanda':      fecha_demanda,
+                'fecha_admite_extracted': fecha_admite_extracted or '',
+                'procesó_aa':         procesó_aa,
+                'enviado':            sent_ok,
+            })
 
-        # STEP 3 — Build constancia/receipt
-        log("Generando constancia del lote...", step=3)
+        # STEP 4 — Build output Excel + constancia
+        log("Generando Excel de métricas...", step=4)
+        excel_out = job_dir / f'Reporte_NP_{job_id[:8]}.xlsx'
+        try:
+            build_output_excel(cases_info, excel_out)
+            log(f"  OK Excel generado: {excel_out.name}")
+        except Exception as e:
+            log(f"  Error generando Excel: {e}")
+            excel_out = None
+
         receipt_path = job_dir / 'constancia_NP.pdf'
         try:
             build_receipt_pdf(cases_info, receipt_path)
-            log("   OK constancia generada.")
+            log("  OK constancia generada.")
         except Exception as e:
-            log(f"   Error generando constancia: {e}")
+            log(f"  Error generando constancia: {e}")
             receipt_path = None
 
-        # STEP 4 — ZIP
-        log("Empaquetando archivos finales...", step=4)
+        # STEP 5 — ZIP
+        log("Empaquetando archivos finales...", step=5)
         zip_path = job_dir / f'NP_lote_{job_id[:8]}.zip'
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             for p in paquetes:
                 zf.write(p, p.name)
             if receipt_path and receipt_path.exists():
                 zf.write(receipt_path, receipt_path.name)
-        log(f"   OK ZIP: {zip_path.name} ({zip_path.stat().st_size // 1024} KB)")
+            if excel_out and excel_out.exists():
+                zf.write(excel_out, excel_out.name)
+        log(f"  OK ZIP: {zip_path.name} ({zip_path.stat().st_size // 1024} KB)")
 
-        job['status']   = 'done'
-        job['zip_path'] = str(zip_path)
-        job['paquetes'] = len(paquetes)
-        job['total']    = len(codigos)
-        job['cases']    = cases_info
-        log("Pipeline completado.", step=5)
+        job['status']    = 'done'
+        job['zip_path']  = str(zip_path)
+        job['paquetes']  = len(paquetes)
+        job['total']     = len(codigos)
+        job['cases']     = cases_info
+        log("Pipeline completado.", step=6)
 
     except Exception as e:
         import traceback
@@ -668,7 +915,6 @@ def index():
 
 @app.route('/process', methods=['POST'])
 def process():
-    # 1. Parse codes
     raw_codigos = request.form.get('codigos', '').strip()
     if not raw_codigos:
         return jsonify({'error': 'No se ingresaron codigos.'}), 400
@@ -680,12 +926,10 @@ def process():
                      'Ingrese numeros separados por ";" (ej: 1372;1496)'
         }), 400
 
-    # 2. Save uploaded files
     job_id  = str(uuid.uuid4())
     job_dir = JOBS_DIR / job_id
     job_dir.mkdir(parents=True)
 
-    # Excel base — acepta 'excel' o 'base_file' (nombre que usa el HTML)
     excel_file = request.files.get('excel') or request.files.get('base_file')
     if not excel_file or not excel_file.filename:
         return jsonify({'error': 'Debe subir el archivo Excel de base.'}), 400
@@ -693,7 +937,6 @@ def process():
     excel_path = job_dir / 'base.xlsx'
     excel_file.save(str(excel_path))
 
-    # Autos PDFs — acepta 'autos_pdfs' o 'autos'
     autos_files = request.files.getlist('autos_pdfs') or request.files.getlist('autos')
     autos_pdfs  = []
     autos_dir   = job_dir / 'autos'
@@ -704,7 +947,6 @@ def process():
             f.save(str(p))
             autos_pdfs.append(p)
 
-    # Demandas PDFs — acepta 'demandas_pdfs' o 'demandas'
     demandas_files = request.files.getlist('demandas_pdfs') or request.files.getlist('demandas')
     demandas_pdfs  = []
     demandas_dir   = job_dir / 'demandas'
@@ -715,10 +957,8 @@ def process():
             f.save(str(p))
             demandas_pdfs.append(p)
 
-    # Destination email — acepta 'email' o 'email_to'
     dest_email = (request.form.get('email') or request.form.get('email_to') or '').strip()
 
-    # 3. Register job
     JOBS[job_id] = {
         'status':  'queued',
         'step':    0,
@@ -726,7 +966,6 @@ def process():
         'codigos': codigos,
     }
 
-    # 4. Launch background thread
     t = threading.Thread(
         target=run_job,
         args=(job_id, job_dir, codigos, excel_path,
@@ -772,7 +1011,6 @@ def download(job_id):
 
 @app.route('/debug-excel', methods=['GET', 'POST'])
 def debug_excel():
-    """Upload an Excel and get a JSON diagnostic: sheets, columns, sample codes."""
     if request.method == 'GET':
         return '''<!DOCTYPE html><html><head><title>Debug Excel</title>
         <style>body{font-family:sans-serif;max-width:600px;margin:80px auto;background:#0a0a0a;color:#fff}
@@ -797,15 +1035,10 @@ def debug_excel():
         sheet_name = 'Total' if 'Total' in sheets else sheets[0]
         df = pd.read_excel(tmp_path, sheet_name=sheet_name, header=0)
         cols = list(df.columns)
-        # Find # column
         num_col = '#' if '#' in df.columns else cols[0]
-        sample = []
-        for _, row in df.head(10).iterrows():
-            val = row[num_col]
-            sample.append(str(val))
+        sample = [str(row[num_col]) for _, row in df.head(10).iterrows()]
         return jsonify({
-            'sheets': sheets,
-            'sheet_used': sheet_name,
+            'sheets': sheets, 'sheet_used': sheet_name,
             'columns': [str(c) for c in cols],
             'num_col_detected': num_col,
             'sample_codes_from_num_col': sample,
@@ -825,67 +1058,234 @@ def dashboard(job_id):
     cases    = job.get('cases', [])
     paquetes = job.get('paquetes', 0)
     total    = job.get('total', 0)
-    log_lines = job.get('log', [])
+    errores  = total - paquetes
 
-    rows_html = ''
+    # Build chart data
+    ciudad_counts = {}
+    tramite_labels = []
+    tramite_data   = []
+
     for c in cases:
-        rows_html += f"""
-        <tr>
-          <td>R{c.get('code','')}</td>
-          <td>{c.get('Nombre','')}</td>
-          <td>{c.get('Radicado','')}</td>
-          <td>{c.get('Ciudad','')}</td>
-          <td>{c.get('Juzgado','')}</td>
-          <td>{c.get('fecha_admite','')}</td>
-        </tr>"""
+        ciudad = c.get('Ciudad', 'N/A') or 'N/A'
+        ciudad_counts[ciudad] = ciudad_counts.get(ciudad, 0) + 1
 
-    log_html = '\n'.join(
-        f'<div class="log-line">{line}</div>'
-        for line in log_lines
-    )
+        fd = c.get('Fecha_Demanda', '')
+        fa = c.get('fecha_admite_extracted', '')
+        if fd and fa:
+            d1 = parse_fecha(fd)
+            d2 = parse_fecha(fa)
+            if d1 and d2:
+                tramite_labels.append(f"R{c.get('code','')}")
+                tramite_data.append(abs((d2 - d1).days))
+
+    ciudad_labels = json.dumps(list(ciudad_counts.keys()))
+    ciudad_values = json.dumps(list(ciudad_counts.values()))
+    tram_labels   = json.dumps(tramite_labels)
+    tram_values   = json.dumps(tramite_data)
+    prom_dias     = round(sum(tramite_data) / len(tramite_data), 1) if tramite_data else 'N/A'
 
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<title>Dashboard NP - {job_id[:8]}</title>
+<title>Dashboard NP</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <style>
-  body {{ font-family: 'Segoe UI', sans-serif; background:#0f0f1a; color:#e0e0e0;
-         margin:0; padding:24px; }}
-  h1 {{ color:#e91e8c; }}
-  .stat-row {{ display:flex; gap:24px; margin:16px 0; }}
-  .stat {{ background:#1a1a2e; border-radius:12px; padding:16px 24px; min-width:120px; }}
-  .stat .num {{ font-size:2rem; font-weight:700; color:#e91e8c; }}
-  .stat .lbl {{ font-size:.85rem; color:#888; margin-top:4px; }}
-  table {{ width:100%; border-collapse:collapse; margin-top:16px; }}
-  th {{ background:#e91e8c; color:#fff; padding:8px 12px; text-align:left; }}
-  td {{ padding:7px 12px; border-bottom:1px solid #2a2a3e; }}
-  tr:hover td {{ background:#1a1a2e; }}
-  .log {{ background:#0a0a14; border-radius:8px; padding:12px; margin-top:24px;
-          max-height:300px; overflow-y:auto; font-size:.82rem; }}
-  .log-line {{ padding:3px 0; border-bottom:1px solid #1a1a2e; }}
-  .btn {{ background:#e91e8c; color:#fff; border:none; border-radius:8px;
-          padding:10px 24px; font-size:1rem; cursor:pointer; text-decoration:none;
-          display:inline-block; margin-top:16px; }}
-  .btn:hover {{ background:#c4006a; }}
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{font-family:'Segoe UI',Arial,sans-serif;background:#0f0f1a;color:#e0e0e0;padding:28px}}
+  h2{{color:#e91e8c;margin-bottom:4px;font-size:1.3rem}}
+  .sub{{color:#888;font-size:.85rem;margin-bottom:24px}}
+  .kpi-row{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:28px}}
+  .kpi{{background:#1a1a2e;border-radius:12px;padding:18px 28px;min-width:140px;border:1px solid #2a2a3e}}
+  .kpi .num{{font-size:2.4rem;font-weight:800;color:#e91e8c;line-height:1}}
+  .kpi .lbl{{font-size:.8rem;color:#888;margin-top:6px;text-transform:uppercase;letter-spacing:.5px}}
+  .kpi.ok .num{{color:#4caf50}}
+  .kpi.err .num{{color:#f44336}}
+  .kpi.prom .num{{color:#ff9800;font-size:1.6rem}}
+  .charts{{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:28px}}
+  .chart-box{{background:#1a1a2e;border-radius:12px;padding:20px;border:1px solid #2a2a3e}}
+  .chart-box h3{{color:#ccc;font-size:.95rem;margin-bottom:14px;font-weight:600}}
+  .btn-row{{display:flex;gap:12px;margin-top:8px}}
+  .btn{{padding:10px 24px;border-radius:8px;border:none;cursor:pointer;font-size:.9rem;font-weight:600}}
+  .btn-primary{{background:#e91e8c;color:#fff}}
+  .btn-primary:hover{{background:#c4006a}}
+  .btn-outline{{background:transparent;color:#e91e8c;border:2px solid #e91e8c}}
+  .btn-outline:hover{{background:#e91e8c;color:#fff}}
+  @media(max-width:640px){{.charts{{grid-template-columns:1fr}}}}
 </style>
 </head>
 <body>
-<h1>Dashboard - Lote NP</h1>
-<div class="stat-row">
-  <div class="stat"><div class="num">{paquetes}</div><div class="lbl">Paquetes generados</div></div>
-  <div class="stat"><div class="num">{total}</div><div class="lbl">Codigos procesados</div></div>
-  <div class="stat"><div class="num">{hoy_str()}</div><div class="lbl">Fecha</div></div>
+<h2>Dashboard — Lote NP</h2>
+<p class="sub">Generado el {hoy_str()}</p>
+
+<div class="kpi-row">
+  <div class="kpi">
+    <div class="num">{total}</div>
+    <div class="lbl">NP Procesadas</div>
+  </div>
+  <div class="kpi ok">
+    <div class="num">{paquetes}</div>
+    <div class="lbl">Exitosas</div>
+  </div>
+  <div class="kpi err">
+    <div class="num">{errores}</div>
+    <div class="lbl">Con error</div>
+  </div>
+  <div class="kpi prom">
+    <div class="num">{prom_dias}</div>
+    <div class="lbl">Días promedio trámite</div>
+  </div>
 </div>
-<a href="/download/{job_id}" class="btn">Descargar ZIP</a>
-<table>
-  <thead>
-    <tr><th>Codigo</th><th>Nombre</th><th>Radicado</th>
-        <th>Ciudad</th><th>Juzgado</th><th>Fecha admision</th></tr>
-  </thead>
-  <tbody>{rows_html}</tbody>
-</table>
-<div class="log">{log_html}</div>
+
+<div class="charts">
+  <div class="chart-box">
+    <h3>Notificaciones Personales por Ciudad</h3>
+    <canvas id="chart-ciudad" height="220"></canvas>
+  </div>
+  <div class="chart-box">
+    <h3>Tiempo de Trámite por Caso (días)</h3>
+    <canvas id="chart-tramite" height="220"></canvas>
+  </div>
+</div>
+
+<div class="btn-row">
+  <button class="btn btn-outline" onclick="window.open('/resumen/{job_id}','_blank')">📄 Resumen</button>
+  <a href="/download/{job_id}" class="btn btn-primary">⬇️ Descargar ZIP</a>
+</div>
+
+<script>
+const PINK = '#e91e8c';
+const GREEN = '#4caf50';
+const chartDefaults = {{
+  plugins:{{legend:{{display:false}}}},
+  scales:{{
+    x:{{ticks:{{color:'#aaa',font:{{size:11}}}},grid:{{color:'#2a2a3e'}}}},
+    y:{{ticks:{{color:'#aaa',font:{{size:11}}}},grid:{{color:'#2a2a3e'}}}}
+  }}
+}};
+
+new Chart(document.getElementById('chart-ciudad'), {{
+  type: 'bar',
+  data: {{
+    labels: {ciudad_labels},
+    datasets: [{{
+      data: {ciudad_values},
+      backgroundColor: PINK + 'cc',
+      borderColor: PINK,
+      borderWidth: 1,
+      borderRadius: 6,
+    }}]
+  }},
+  options: {{...chartDefaults}}
+}});
+
+new Chart(document.getElementById('chart-tramite'), {{
+  type: 'bar',
+  data: {{
+    labels: {tram_labels},
+    datasets: [{{
+      data: {tram_values},
+      backgroundColor: GREEN + 'aa',
+      borderColor: GREEN,
+      borderWidth: 1,
+      borderRadius: 6,
+    }}]
+  }},
+  options: {{...chartDefaults, plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label: ctx => ctx.raw + ' días'}}}}}}}}
+}});
+</script>
+</body>
+</html>"""
+
+
+@app.route('/resumen/<job_id>')
+def resumen(job_id):
+    """Printable summary with KPIs and charts (no individual table)."""
+    job = JOBS.get(job_id)
+    if not job:
+        return "Job no encontrado", 404
+
+    cases    = job.get('cases', [])
+    paquetes = job.get('paquetes', 0)
+    total    = job.get('total', 0)
+    errores  = total - paquetes
+
+    ciudad_counts = {}
+    tramite_labels = []
+    tramite_data   = []
+    for c in cases:
+        ciudad = c.get('Ciudad', 'N/A') or 'N/A'
+        ciudad_counts[ciudad] = ciudad_counts.get(ciudad, 0) + 1
+        fd = c.get('Fecha_Demanda', '')
+        fa = c.get('fecha_admite_extracted', '')
+        if fd and fa:
+            d1 = parse_fecha(fd)
+            d2 = parse_fecha(fa)
+            if d1 and d2:
+                tramite_labels.append(f"R{c.get('code','')}")
+                tramite_data.append(abs((d2 - d1).days))
+
+    ciudad_labels = json.dumps(list(ciudad_counts.keys()))
+    ciudad_values = json.dumps(list(ciudad_counts.values()))
+    tram_labels   = json.dumps(tramite_labels)
+    tram_values   = json.dumps(tramite_data)
+    prom_dias     = round(sum(tramite_data) / len(tramite_data), 1) if tramite_data else 'N/A'
+    now_str       = datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Resumen NP — QPAlliance</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  body{{font-family:'Segoe UI',Arial,sans-serif;background:#fff;color:#222;padding:32px;max-width:900px;margin:0 auto}}
+  h1{{color:#D4006A;font-size:1.6rem;margin-bottom:4px}}
+  .sub{{color:#888;font-size:.85rem;margin-bottom:24px}}
+  .kpi-row{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:28px}}
+  .kpi{{background:#fff5f9;border:1px solid #D4006A33;border-radius:10px;padding:16px 24px;min-width:120px}}
+  .kpi .num{{font-size:2rem;font-weight:800;color:#D4006A}}
+  .kpi .lbl{{font-size:.78rem;color:#888;margin-top:4px;text-transform:uppercase;letter-spacing:.5px}}
+  .charts{{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:28px}}
+  .chart-box{{border:1px solid #eee;border-radius:10px;padding:16px}}
+  .chart-box h3{{color:#333;font-size:.9rem;margin-bottom:12px;font-weight:600}}
+  .footer{{color:#aaa;font-size:.78rem;margin-top:32px;border-top:1px solid #eee;padding-top:12px}}
+  .no-print{{margin-bottom:20px}}
+  @media print{{.no-print{{display:none}}}}
+</style>
+</head>
+<body>
+<div class="no-print">
+  <button onclick="window.print()" style="background:#D4006A;color:#fff;border:none;padding:10px 24px;border-radius:8px;cursor:pointer;font-size:.9rem;font-weight:600">🖨️ Imprimir</button>
+</div>
+
+<h1>Resumen — Lote NP</h1>
+<p class="sub">QPAlliance — Legal Department &nbsp;|&nbsp; Descargado el {now_str}</p>
+
+<div class="kpi-row">
+  <div class="kpi"><div class="num">{total}</div><div class="lbl">NP Procesadas</div></div>
+  <div class="kpi"><div class="num">{paquetes}</div><div class="lbl">Exitosas</div></div>
+  <div class="kpi"><div class="num">{errores}</div><div class="lbl">Con error</div></div>
+  <div class="kpi"><div class="num">{prom_dias}</div><div class="lbl">Días promedio trámite</div></div>
+</div>
+
+<div class="charts">
+  <div class="chart-box">
+    <h3>NPs por Ciudad</h3>
+    <canvas id="rc1" height="200"></canvas>
+  </div>
+  <div class="chart-box">
+    <h3>Tiempo de Trámite por Caso (días)</h3>
+    <canvas id="rc2" height="200"></canvas>
+  </div>
+</div>
+
+<div class="footer">Generado por Elena NP — QPAlliance — {hoy_str()}</div>
+
+<script>
+new Chart(document.getElementById('rc1'),{{type:'bar',data:{{labels:{ciudad_labels},datasets:[{{data:{ciudad_values},backgroundColor:'#D4006Acc',borderColor:'#D4006A',borderWidth:1,borderRadius:4}}]}},options:{{plugins:{{legend:{{display:false}}}},scales:{{x:{{ticks:{{font:{{size:10}}}}}},y:{{ticks:{{font:{{size:10}}}}}}}}}}}} );
+new Chart(document.getElementById('rc2'),{{type:'bar',data:{{labels:{tram_labels},datasets:[{{data:{tram_values},backgroundColor:'#4caf5099',borderColor:'#4caf50',borderWidth:1,borderRadius:4}}]}},options:{{plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label:ctx=>ctx.raw+' días'}}}}}},scales:{{x:{{ticks:{{font:{{size:10}}}}}},y:{{ticks:{{font:{{size:10}}}}}}}}}}}} );
+</script>
 </body>
 </html>"""
 
