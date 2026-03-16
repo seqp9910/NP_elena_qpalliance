@@ -144,17 +144,25 @@ def parse_codigos(raw: str) -> list:
             result.append(int(m.group(1)))
     return list(dict.fromkeys(result))  # deduplicate preserving order
 
-def find_pdf_for_code(code: int, paths: list) -> Path | None:
-    """Find a PDF whose filename contains the code number."""
+def find_pdf_for_code(code: int, paths: list, all_codes: list = None) -> Path | None:
+    """
+    Find a PDF whose filename contains the code number.
+    Fallback: if only 1 PDF and 1 code, assume it matches.
+    """
+    if not paths:
+        return None
     code_str = str(code)
-    # Priority: R0*1372 pattern
+    # Priority 1: R0*1372 pattern
     for p in paths:
         if re.search(r'[Rr]0*' + code_str + r'[\W_\.]', p.name + '.'):
             return p
-    # Fallback: code digits anywhere in stem
+    # Priority 2: code digits anywhere in stem
     for p in paths:
         if code_str in re.sub(r'\D', '', p.stem):
             return p
+    # Fallback: if only 1 file and 1 code being processed, assume it matches
+    if len(paths) == 1 and all_codes and len(all_codes) == 1:
+        return paths[0]
     return None
 
 def load_excel(excel_path: Path) -> dict:
@@ -689,10 +697,12 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
 
         # STEP 2 — Validate documents exist for each code
         log("Validando documentos requeridos...", step=2)
+        log(f"  Autos subidos: {[p.name for p in autos_pdfs]}")
+        log(f"  Demandas subidas: {[p.name for p in demandas_pdfs]}")
         valid_codes = []
         for code in found:
-            aa_pdf = find_pdf_for_code(code, autos_pdfs)
-            dm_pdf = find_pdf_for_code(code, demandas_pdfs)
+            aa_pdf = find_pdf_for_code(code, autos_pdfs, found)
+            dm_pdf = find_pdf_for_code(code, demandas_pdfs, found)
             missing_docs = []
             if not aa_pdf:
                 missing_docs.append('auto admisorio')
@@ -723,8 +733,8 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             fecha_demanda = row.get('Fecha_Demanda', '')
 
             # Locate uploaded PDFs (guaranteed to exist after validation)
-            auto_pdf    = find_pdf_for_code(code, autos_pdfs)
-            demanda_pdf = find_pdf_for_code(code, demandas_pdfs)
+            auto_pdf    = find_pdf_for_code(code, autos_pdfs, valid_codes)
+            demanda_pdf = find_pdf_for_code(code, demandas_pdfs, valid_codes)
 
             # 3a. Extract fecha_admite from auto admisorio PDF
             fecha_admite_extracted = extract_fecha_admite_from_pdf(auto_pdf)
