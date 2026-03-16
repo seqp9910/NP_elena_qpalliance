@@ -188,8 +188,67 @@ def load_excel(excel_path: Path) -> dict:
 
     return result
 
+def _fix_split_placeholders(xml_text: str, replacements: dict) -> str:
+    """
+    Replace {FieldName} placeholders in DOCX XML even when split across 3 w:r runs:
+      run1: <w:t>{ or ' {'</w:t>
+      run2: <w:t>FieldName</w:t>
+      run3: <w:t>}</w:t>
+    Strategy: find field name alone in w:t, locate surrounding { and } runs,
+    replace w:t contents: first run → value, field run → empty, } run → empty.
+    """
+    for field, value in replacements.items():
+        safe_val = str(value).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+        # Pass 1: simple single-run replacements
+        for variant in ['{'+field+'}', '{ '+field+'}', '{'+field+' }', '{ '+field+' }']:
+            xml_text = xml_text.replace(variant, safe_val)
+
+        # Pass 2: split-run — field name appears alone in a w:t element
+        field_pat = r'<w:t(?:\s[^>]*)?>' + re.escape(field) + r'</w:t>'
+        for m_field in list(re.finditer(field_pat, xml_text)):
+            pos = m_field.start()
+
+            # Search backwards (up to 1500 chars) for opening { in a w:t
+            before = xml_text[max(0, pos-1500):pos]
+            opens = list(re.finditer(r'<w:t(?:\s[^>]*)?>[ ]?\{</w:t>', before))
+            if not opens:
+                continue
+            last_open = opens[-1]
+            open_abs_start = max(0, pos-1500) + last_open.start()
+            open_abs_end   = max(0, pos-1500) + last_open.end()
+
+            # Search forward (up to 500 chars) for closing } in a w:t
+            after = xml_text[m_field.end():m_field.end()+500]
+            m_close = re.search(r'<w:t(?:\s[^>]*)?>}</w:t>', after)
+            if not m_close:
+                continue
+            close_abs_start = m_field.end() + m_close.start()
+            close_abs_end   = m_field.end() + m_close.end()
+
+            # Replace w:t content in each of the 3 runs
+            def repl_open(m, val=safe_val):
+                return m.group(1) + val + m.group(2)
+            def repl_empty(m):
+                return m.group(1) + m.group(2)
+
+            new_open  = re.sub(r'(<w:t[^>]*>)[ ]?\{(</w:t>)', repl_open,
+                               xml_text[open_abs_start:open_abs_end])
+            new_field = re.sub(r'(<w:t[^>]*>)' + re.escape(field) + r'(</w:t>)',
+                               repl_empty, xml_text[m_field.start():m_field.end()])
+            new_close = re.sub(r'(<w:t[^>]*>)}(</w:t>)', repl_empty,
+                               xml_text[close_abs_start:close_abs_end])
+
+            xml_text = (xml_text[:open_abs_start] + new_open +
+                        xml_text[open_abs_end:m_field.start()] + new_field +
+                        xml_text[m_field.end():close_abs_start] + new_close +
+                        xml_text[close_abs_end:])
+            break  # one replacement per field per call
+    return xml_text
+
+
 def fill_template(template_path: Path, data: dict, output_path: Path):
-    """Replace {placeholder} in DOCX template and save to output_path."""
+    """Replace {placeholder} in DOCX template (handles split-run XML) and save."""
     import shutil as _shutil
     import zipfile as _zipfile
 
@@ -199,16 +258,12 @@ def fill_template(template_path: Path, data: dict, output_path: Path):
         names = z.namelist()
         contents = {n: z.read(n) for n in names}
 
-    fecha_hoy = hoy_str()
+    all_data = dict(data)
+    all_data['fecha_de_hoy'] = hoy_str()
 
     def replace_in_xml(xml_bytes: bytes) -> bytes:
         text = xml_bytes.decode('utf-8')
-        for key, val in data.items():
-            text = text.replace('{' + key + '}', str(val))
-            text = text.replace('{ ' + key + '}', str(val))  # space variant
-            text = text.replace('{' + key + ' }', str(val))
-        text = text.replace('{fecha_de_hoy}', fecha_hoy)
-        text = text.replace('{ fecha_de_hoy}', fecha_hoy)
+        text = _fix_split_placeholders(text, all_data)
         return text.encode('utf-8')
 
     xml_files = [n for n in names if n.endswith('.xml') or n.endswith('.rels')]
@@ -243,6 +298,99 @@ def merge_pdfs(pdf_list: list, output_path: Path):
         writer.append(str(p))
     with open(output_path, 'wb') as f:
         writer.write(f)
+
+def build_separator_page(output_path: Path, text: str = 'DEMANDA'):
+    """Build a single-page PDF with text centered at mid-page (Caladea Bold 72pt)."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    CALADEA = '/usr/share/fonts/truetype/crosextra/Caladea-Bold.ttf'
+    font_name = 'CalaDeaBold'
+    try:
+        pdfmetrics.registerFont(TTFont(font_name, CALADEA))
+    except Exception:
+        font_name = 'Helvetica-Bold'
+
+    w, h = letter
+    c = canvas.Canvas(str(output_path), pagesize=letter)
+    c.setFont(font_name, 72)
+    text_w = c.stringWidth(text, font_name, 72)
+    c.drawString((w - text_w) / 2, h / 2, text)
+    c.save()
+
+
+def build_email_proof_pdf(output_path: Path, code: int, client: dict,
+                          to_email: str, sent_ok: bool, sent_msg: str,
+                          email_subject: str, email_body_text: str):
+    """Build a PDF page showing the sent email details as proof of dispatch."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('Title2', parent=styles['Heading1'],
+                                 fontSize=14, textColor=colors.HexColor('#D4006A'))
+    label_style = ParagraphStyle('Label', parent=styles['Normal'],
+                                 fontSize=9, textColor=colors.grey)
+    value_style = ParagraphStyle('Value', parent=styles['Normal'], fontSize=10)
+    body_style  = ParagraphStyle('Body', parent=styles['Normal'],
+                                 fontSize=9, leading=13)
+
+    doc = SimpleDocTemplate(str(output_path), pagesize=letter,
+                            leftMargin=2*cm, rightMargin=2*cm,
+                            topMargin=2*cm, bottomMargin=2*cm)
+    elements = []
+
+    status_color = '#006600' if sent_ok else '#CC0000'
+    status_text  = 'ENVIADO ✓' if sent_ok else 'ERROR AL ENVIAR'
+
+    elements.append(Paragraph('Constancia de Envío — Notificación Personal', title_style))
+    elements.append(Spacer(1, 6))
+    elements.append(HRFlowable(width='100%', thickness=1,
+                                color=colors.HexColor('#D4006A')))
+    elements.append(Spacer(1, 10))
+
+    fields = [
+        ('Estado',       f'<font color="{status_color}"><b>{status_text}</b></font>'),
+        ('Fecha y hora', datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')),
+        ('De',           SENDER_EMAIL),
+        ('Para',         to_email),
+        ('Asunto',       email_subject),
+        ('Código',       f'R{code}'),
+        ('Nombre',       client.get('Nombre', '')),
+        ('Radicado',     client.get('Radicado', '')),
+    ]
+    if not sent_ok:
+        fields.append(('Detalle error', sent_msg[:200]))
+
+    for label, value in fields:
+        elements.append(Paragraph(label, label_style))
+        elements.append(Paragraph(str(value), value_style))
+        elements.append(Spacer(1, 4))
+
+    elements.append(Spacer(1, 10))
+    elements.append(HRFlowable(width='100%', thickness=0.5, color=colors.grey))
+    elements.append(Spacer(1, 6))
+    elements.append(Paragraph('Cuerpo del correo:', label_style))
+    elements.append(Spacer(1, 4))
+    # Render email body as plain text (strip any HTML tags)
+    plain_body = re.sub(r'<[^>]+>', '', email_body_text).strip()
+    for line in plain_body.split('\n'):
+        line = line.strip()
+        if line:
+            elements.append(Paragraph(line, body_style))
+
+    elements.append(Spacer(1, 10))
+    elements.append(Paragraph(
+        f'Generado por Elena NP — QPAlliance — {hoy_str()}',
+        ParagraphStyle('Footer', parent=styles['Normal'],
+                       fontSize=8, textColor=colors.grey)))
+    doc.build(elements)
+
 
 def build_receipt_pdf(codes_data: list, output_path: Path):
     """Build a receipt PDF listing all processed cases."""
@@ -358,74 +506,126 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             job['error']  = f"Codigos {codigos} no encontrados. Primeros en Excel: {sample_keys}"
             return
 
-        # STEP 2 — Fill DOCX templates and convert to PDF
-        log("Generando autos admisorios...", step=2)
-        generated_pdfs = []
+        # STEP 2 — Generate NP, send email, build proof, assemble final PDF per client
+        log("Generando notificaciones personales...", step=2)
         cases_info = []
+        paquetes   = []
 
         for code in codigos:
             if code not in excel_data:
                 log(f"   Codigo {code} no encontrado en Excel, omitiendo.")
                 continue
 
-            row = excel_data[code]
+            row          = excel_data[code]
+            nombre       = row.get('Nombre', '')
+            radicado     = row.get('Radicado', '')
+            ciudad       = row.get('Ciudad', '')
+            juzgado      = row.get('Juzgado', '')
+            fecha_admite = row.get('fecha_admite', '')
+
+            # 2a. Fill NP template → DOCX → PDF
             fill_data = {
-                'Nombre':       row.get('Nombre', ''),
-                'Radicado':     row.get('Radicado', ''),
-                'Ciudad':       row.get('Ciudad', ''),
-                'Juzgado':      row.get('Juzgado', ''),
-                'fecha_admite': row.get('fecha_admite', ''),
-                'fecha_de_hoy': hoy_str(),
+                'Nombre':       nombre,
+                'Radicado':     radicado,
+                'Ciudad':       ciudad,
+                'Juzgado':      juzgado,
+                'fecha_admite': fecha_admite,
             }
-
             docx_out = job_dir / f"auto_{code}.docx"
-            fill_template(template_path, fill_data, docx_out)
-
+            np_pdf   = None
             try:
-                pdf_out = docx_to_pdf(docx_out, job_dir)
-                generated_pdfs.append(pdf_out)
-                log(f"   OK auto admisorio: R{code} - {row.get('Nombre','')}")
+                fill_template(template_path, fill_data, docx_out)
+                np_pdf = docx_to_pdf(docx_out, job_dir)
+                log(f"   OK NP generada: R{code} - {nombre}")
             except Exception as e:
-                log(f"   Error convirtiendo R{code}: {e}")
+                log(f"   Error generando NP R{code}: {e}")
 
-            cases_info.append({'code': code, **row})
+            # 2b. Build legal email body
+            email_subject = (f"R{code} Notificación personal - {radicado} - {nombre}")
+            email_body = (
+                f"<p>Señores,<br>Rappi S.A.S.<br>Felipe Villamarín Lafaurie</p>"
+                f"<p><strong>RADICADO:</strong> {radicado}<br>"
+                f"<strong>REFERENCIA:</strong> Demanda ordinaria laboral promovida por "
+                f"{nombre} en contra de Rappi SAS<br>"
+                f"<strong>ASUNTO:</strong> Notificación personal de auto admisorio de "
+                f"demanda ordinaria laboral de primera instancia.</p>"
+                f"<p>Reciban un cordial saludo. De manera atenta, conforme lo dispuesto "
+                f"por el artículo 8 de la Ley 2213 de 2022, nos permitimos notificarle "
+                f"el auto del {fecha_admite}, por medio del cual se admite la demanda "
+                f"que impetra nuestro cliente, {nombre}. A la presente se adjunta:</p>"
+                f"<ol>"
+                f"<li>Auto admisorio de la demanda.</li>"
+                f"<li>Notificación personal.</li>"
+                f"<li>Escrito de demanda.</li>"
+                f"<li>Prueba 1.1.1 (video)</li>"
+                f"<li>Pruebas documentales 1.1.2. a 1.1.16.</li>"
+                f"<li>Poder debidamente otorgado</li>"
+                f"<li>Anexos: Certificado de existencia y representación legal de la firma "
+                f"de abogados QPALLIANCE SAS, certificado de existencia y representación "
+                f"legal de Rappi SAS</li>"
+                f"<li>Proyecto de liquidación de pretensiones.</li>"
+                f"</ol>"
+            )
 
-        # STEP 3 — Merge PDFs (auto + autos_pdf + demanda_pdf per case)
-        log("Ensamblando paquetes PDF...", step=3)
-        paquetes = []
+            # 2c. Send individual email with NP PDF attached
+            sent_ok  = False
+            sent_msg = 'BREVO_API_KEY no configurada'
+            if dest_email and BREVO_API_KEY:
+                log(f"   Enviando correo R{code} → {dest_email}...")
+                attach = np_pdf if (np_pdf and np_pdf.exists()) else None
+                sent_ok, sent_msg = send_email_brevo(
+                    dest_email, dest_email, email_subject, email_body, attach)
+                log(f"   {'OK correo enviado' if sent_ok else 'Error correo'} R{code}: {sent_msg[:80]}")
+            else:
+                log(f"   Email no enviado R{code} (BREVO_API_KEY no configurada)")
 
-        for code in codigos:
-            if code not in excel_data:
-                continue
+            # 2d. Build email proof page
+            proof_pdf = job_dir / f"proof_{code}.pdf"
+            try:
+                build_email_proof_pdf(proof_pdf, code, row,
+                                      dest_email or '(sin destinatario)',
+                                      sent_ok, sent_msg, email_subject, email_body)
+            except Exception as e:
+                log(f"   Error constancia correo R{code}: {e}")
+                proof_pdf = None
 
-            auto_pdf        = next((p for p in generated_pdfs
-                                    if p.stem == f'auto_{code}'), None)
-            auto_pdf_source = find_pdf_for_code(code, autos_pdfs)
-            demanda_pdf     = find_pdf_for_code(code, demandas_pdfs)
+            # 2e. Build DEMANDA separator page
+            sep_pdf = job_dir / f"sep_{code}.pdf"
+            try:
+                build_separator_page(sep_pdf, 'DEMANDA')
+            except Exception as e:
+                log(f"   Error separador R{code}: {e}")
+                sep_pdf = None
 
+            # 2f. Locate uploaded demanda PDF
+            demanda_pdf = find_pdf_for_code(code, demandas_pdfs)
+
+            # 2g. Merge final PDF: NP → email proof → DEMANDA separator → demanda
             parts = []
-            if auto_pdf and auto_pdf.exists():
-                parts.append(auto_pdf)
-            elif auto_pdf_source:
-                parts.append(auto_pdf_source)
-
+            if np_pdf and np_pdf.exists():
+                parts.append(np_pdf)
+            if proof_pdf and proof_pdf.exists():
+                parts.append(proof_pdf)
+            if sep_pdf and sep_pdf.exists():
+                parts.append(sep_pdf)
             if demanda_pdf:
                 parts.append(demanda_pdf)
 
-            if not parts:
-                log(f"   Sin PDFs para R{code}, omitiendo paquete.")
-                continue
+            if parts:
+                paquete_path = job_dir / f"R{code}.DDD.NP.done.pdf"
+                try:
+                    merge_pdfs(parts, paquete_path)
+                    paquetes.append(paquete_path)
+                    log(f"   OK R{code}.DDD.NP.done.pdf ({len(parts)} partes)")
+                except Exception as e:
+                    log(f"   Error ensamblando R{code}: {e}")
+            else:
+                log(f"   Sin partes para R{code}, omitiendo.")
 
-            paquete_path = job_dir / f"NP_R{code}.pdf"
-            try:
-                merge_pdfs(parts, paquete_path)
-                paquetes.append(paquete_path)
-                log(f"   OK paquete R{code}: {len(parts)} archivo(s) merged")
-            except Exception as e:
-                log(f"   Error ensamblando R{code}: {e}")
+            cases_info.append({'code': code, **row})
 
-        # STEP 4 — Build constancia/receipt
-        log("Generando constancia...", step=4)
+        # STEP 3 — Build constancia/receipt
+        log("Generando constancia del lote...", step=3)
         receipt_path = job_dir / 'constancia_NP.pdf'
         try:
             build_receipt_pdf(cases_info, receipt_path)
@@ -434,44 +634,22 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             log(f"   Error generando constancia: {e}")
             receipt_path = None
 
-        # STEP 5 — ZIP everything
-        log("Empaquetando archivos finales...", step=5)
+        # STEP 4 — ZIP
+        log("Empaquetando archivos finales...", step=4)
         zip_path = job_dir / f'NP_lote_{job_id[:8]}.zip'
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             for p in paquetes:
                 zf.write(p, p.name)
             if receipt_path and receipt_path.exists():
                 zf.write(receipt_path, receipt_path.name)
-
-        log(f"   OK ZIP creado: {zip_path.name} ({zip_path.stat().st_size // 1024} KB)")
-
-        # STEP 6 — Send email
-        if dest_email and BREVO_API_KEY:
-            log(f"Enviando notificacion a {dest_email}...", step=6)
-            html = f"""
-            <h2>Lote NP procesado - QPAlliance</h2>
-            <p>Se procesaron <strong>{len(paquetes)}</strong> notificacion(es) personal(es).</p>
-            <p>Fecha: {hoy_str()}</p>
-            <p>Adjunto encontrara el ZIP con todos los paquetes PDF.</p>
-            """
-            ok, msg = send_email_brevo(
-                dest_email, dest_email,
-                f"Lote NP - {len(paquetes)} notificaciones - {hoy_str()}",
-                html, zip_path
-            )
-            if ok:
-                log("   OK email enviado correctamente.")
-            else:
-                log(f"   Email fallido: {msg}")
-        elif dest_email:
-            log("   Email no enviado (BREVO_API_KEY no configurada).")
+        log(f"   OK ZIP: {zip_path.name} ({zip_path.stat().st_size // 1024} KB)")
 
         job['status']   = 'done'
         job['zip_path'] = str(zip_path)
         job['paquetes'] = len(paquetes)
         job['total']    = len(codigos)
         job['cases']    = cases_info
-        log("Pipeline completado.", step=6)
+        log("Pipeline completado.", step=5)
 
     except Exception as e:
         import traceback
