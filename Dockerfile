@@ -23,8 +23,12 @@ COPY . .
 # Create jobs directory
 RUN mkdir -p jobs
 
+# Make start script executable
+COPY start.sh .
+RUN chmod +x start.sh
+
 # Expose port
 EXPOSE 8080
 
-# Run with gunicorn (production server)
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 2 --timeout 300 app:app"]
+# Run with gunicorn via start script
+CMD ["./start.sh"]
