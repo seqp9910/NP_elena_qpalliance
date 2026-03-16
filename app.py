@@ -101,11 +101,16 @@ def load_excel(excel_path: Path) -> dict:
     df = pd.read_excel(excel_path, sheet_name=sheet_name, header=0)
 
     # 4. Normalize column names for mapping
+    # Priority for num column: '#' exact > 'numero'/'num' > 'cod'/'codigo'
     col_map = {}
     for col in df.columns:
         norm = normalizar(str(col))
-        # code column: '#' or 'cod' or 'codigo' or 'num'
-        if norm in ('#', 'num', 'numero', 'n', 'cod', 'codigo', 'no'):
+        # '#' gets highest priority as the sequential case number
+        if norm == '#':
+            col_map['num'] = col          # override always — '#' wins
+        elif norm in ('num', 'numero', 'n', 'no') and 'num' not in col_map:
+            col_map['num'] = col
+        elif norm in ('cod', 'codigo') and 'num' not in col_map:
             col_map.setdefault('num', col)
         elif 'nombre' in norm:
             col_map.setdefault('nombre', col)
@@ -115,10 +120,10 @@ def load_excel(excel_path: Path) -> dict:
             col_map.setdefault('ciudad', col)
         elif 'juzgado' in norm:
             col_map.setdefault('juzgado', col)
+        elif 'fecha' in norm and 'admite' in norm:
+            col_map['fecha_admite'] = col      # prefer fecha_admite over fecha_demanda
         elif 'fecha' in norm and 'demanda' in norm:
             col_map.setdefault('fecha_admite', col)
-        elif 'fecha' in norm and 'admite' in norm:
-            col_map['fecha_admite'] = col  # prefer this over fecha_demanda
         elif 'correo' in norm or 'email' in norm or 'electroni' in norm or 'direcc' in norm:
             col_map.setdefault('email', col)
 
@@ -126,7 +131,7 @@ def load_excel(excel_path: Path) -> dict:
     result = {}
     num_col = col_map.get('num')
     if num_col is None:
-        # Try '#' directly
+        # Last resort: try '#' directly
         if '#' in df.columns:
             num_col = '#'
         else:
@@ -338,12 +343,20 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
         # STEP 1 — Load Excel
         log("Cargando base de datos Excel...", step=1)
         excel_data = load_excel(excel_path)
-        log(f"   OK: {len(excel_data)} registros cargados.")
+        sample_keys = list(excel_data.keys())[:5]
+        log(f"   OK: {len(excel_data)} registros cargados. Primeros codigos: {sample_keys}")
+        log(f"   Codigos solicitados: {codigos}")
 
         # Verify all requested codes exist
-        missing = [c for c in codigos if c not in excel_data]
-        if missing:
-            log(f"   Advertencia: codigos no encontrados en Excel: {missing}")
+        found    = [c for c in codigos if c in excel_data]
+        missing  = [c for c in codigos if c not in excel_data]
+        log(f"   Encontrados: {found} | No encontrados: {missing}")
+        if not found:
+            log("   ERROR: Ninguno de los codigos solicitados existe en el Excel. "
+                "Verifica que estas subiendo la hoja 'Total' y usando los numeros de la columna '#'.")
+            job['status'] = 'error'
+            job['error']  = f"Codigos {codigos} no encontrados. Primeros en Excel: {sample_keys}"
+            return
 
         # STEP 2 — Fill DOCX templates and convert to PDF
         log("Generando autos admisorios...", step=2)
@@ -570,6 +583,42 @@ def download(job_id):
         return jsonify({'error': 'Archivo no encontrado'}), 404
     return send_file(str(zip_path), as_attachment=True,
                      download_name=zip_path.name)
+
+@app.route('/debug-excel', methods=['POST'])
+def debug_excel():
+    """Upload an Excel and get a JSON diagnostic: sheets, columns, sample codes."""
+    f = request.files.get('excel') or request.files.get('base_file')
+    if not f:
+        return jsonify({'error': 'Sube el Excel con campo "excel"'}), 400
+    import tempfile, pandas as pd, openpyxl
+    with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+        f.save(tmp.name)
+        tmp_path = Path(tmp.name)
+    try:
+        wb = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
+        sheets = wb.sheetnames
+        wb.close()
+        sheet_name = 'Total' if 'Total' in sheets else sheets[0]
+        df = pd.read_excel(tmp_path, sheet_name=sheet_name, header=0)
+        cols = list(df.columns)
+        # Find # column
+        num_col = '#' if '#' in df.columns else cols[0]
+        sample = []
+        for _, row in df.head(10).iterrows():
+            val = row[num_col]
+            sample.append(str(val))
+        return jsonify({
+            'sheets': sheets,
+            'sheet_used': sheet_name,
+            'columns': [str(c) for c in cols],
+            'num_col_detected': num_col,
+            'sample_codes_from_num_col': sample,
+            'total_rows': len(df),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 @app.route('/dashboard/<job_id>')
 def dashboard(job_id):
