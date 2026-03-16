@@ -83,12 +83,31 @@ def parse_fecha(s) -> datetime.date | None:
             pass
     return None
 
+def _pdf_page_to_base64(pdf_path: Path, page_index: int = 0) -> str | None:
+    """Render a PDF page to a PNG and return its base64 string."""
+    try:
+        import fitz  # pymupdf
+        doc = fitz.open(str(pdf_path))
+        if page_index >= len(doc):
+            page_index = 0
+        page = doc[page_index]
+        mat  = fitz.Matrix(2.0, 2.0)          # 2× zoom → ~144 dpi
+        pix  = page.get_pixmap(matrix=mat, alpha=False)
+        png_bytes = pix.tobytes('png')
+        doc.close()
+        import base64
+        return base64.standard_b64encode(png_bytes).decode()
+    except Exception:
+        return None
+
+
 def extract_fecha_admite_from_pdf(pdf_path: Path) -> str | None:
     """
     Extract admission date from an auto admisorio PDF.
-    Strategy 1: search near admission keywords (highest confidence).
-    Strategy 2: first date found anywhere in the text.
-    Returns '05 de enero de 2025' or None.
+    Strategy 1 (primary): Claude vision API — reads the page as an image,
+                          works with both digital and scanned PDFs.
+    Strategy 2 (fallback): pdfplumber text extraction + regex.
+    Returns e.g. '05 de enero de 2025' or None.
     """
     MESES_RE = '(' + '|'.join(MESES_STR[1:]) + ')'
     DATE_WORD = r'\b(\d{1,2})\s+de\s+' + MESES_RE + r'\s+de\s+(\d{4})\b'
@@ -103,6 +122,64 @@ def extract_fecha_admite_from_pdf(pdf_path: Path) -> str | None:
             return f"{d:02d} de {MESES_STR[mo]} de {y}"
         return None
 
+    def parse_date_str(raw: str) -> str | None:
+        """Try to parse a date string from the AI response."""
+        raw = raw.strip()
+        if not raw or raw.upper() == 'NO_FECHA':
+            return None
+        # Already in word form: "15 de marzo de 2024"
+        m = re.search(DATE_WORD, raw, re.IGNORECASE)
+        if m:
+            return to_letras_from_word(m)
+        # Numeric form: 15/03/2024 or 15-03-2024
+        m = re.search(DATE_NUM, raw)
+        if m:
+            return to_letras_from_num(m)
+        return None
+
+    # ── Strategy 1: Claude vision API ────────────────────────────────────────
+    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+    if api_key:
+        img_b64 = _pdf_page_to_base64(pdf_path, page_index=0)
+        if img_b64:
+            try:
+                import anthropic as _anthropic
+                client = _anthropic.Anthropic(api_key=api_key)
+                msg = client.messages.create(
+                    model='claude-haiku-4-5-20251001',
+                    max_tokens=100,
+                    messages=[{
+                        'role': 'user',
+                        'content': [
+                            {
+                                'type': 'image',
+                                'source': {
+                                    'type': 'base64',
+                                    'media_type': 'image/png',
+                                    'data': img_b64,
+                                },
+                            },
+                            {
+                                'type': 'text',
+                                'text': (
+                                    'Este es un auto admisorio de una demanda laboral colombiana. '
+                                    'Extrae la fecha en que fue proferido o admitido el auto. '
+                                    'Responde ÚNICAMENTE con la fecha en formato: '
+                                    'DD de mes de YYYY (ejemplo: 15 de marzo de 2024). '
+                                    'Si no encuentras ninguna fecha clara, responde exactamente: NO_FECHA'
+                                ),
+                            },
+                        ],
+                    }],
+                )
+                raw_answer = msg.content[0].text.strip()
+                result = parse_date_str(raw_answer)
+                if result:
+                    return result
+            except Exception:
+                pass   # fall through to strategy 2
+
+    # ── Strategy 2: pdfplumber text + regex (digital PDFs) ───────────────────
     try:
         import pdfplumber
         text = ''
@@ -117,7 +194,6 @@ def extract_fecha_admite_from_pdf(pdf_path: Path) -> str | None:
     if not text.strip():
         return None
 
-    # ── Strategy 1: date near admission keywords ──────────────────────────────
     keywords = [
         r'auto\s+(?:de\s+)?fecha',
         r'adiado',
@@ -129,27 +205,21 @@ def extract_fecha_admite_from_pdf(pdf_path: Path) -> str | None:
         r'auto\s+del\s+d[ií]a',
     ]
     for kw in keywords:
-        # keyword → up to 120 chars → date (word form)
         m = re.search(kw + r'(?:[^\n]{0,120}?)' + DATE_WORD, text, re.IGNORECASE | re.DOTALL)
         if m:
             return to_letras_from_word(m)
-        # keyword → up to 60 chars → date (numeric)
         m = re.search(kw + r'(?:[^\n]{0,60}?)' + DATE_NUM, text, re.IGNORECASE)
         if m:
             result = to_letras_from_num(m)
             if result:
                 return result
 
-    # ── Strategy 2: first date in the full text (word form preferred) ─────────
     m = re.search(DATE_WORD, text, re.IGNORECASE)
     if m:
         return to_letras_from_word(m)
-
     m = re.search(DATE_NUM, text)
     if m:
-        result = to_letras_from_num(m)
-        if result:
-            return result
+        return to_letras_from_num(m)
 
     return None
 
