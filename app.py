@@ -85,11 +85,24 @@ def parse_fecha(s) -> datetime.date | None:
 
 def extract_fecha_admite_from_pdf(pdf_path: Path) -> str | None:
     """
-    Try to extract the admission date from an auto admisorio PDF.
-    Returns date as '05 de enero de 2025' or None if not found.
-    Tries pdfplumber text extraction first (handles digital PDFs).
+    Extract admission date from an auto admisorio PDF.
+    Strategy 1: search near admission keywords (highest confidence).
+    Strategy 2: first date found anywhere in the text.
+    Returns '05 de enero de 2025' or None.
     """
     MESES_RE = '(' + '|'.join(MESES_STR[1:]) + ')'
+    DATE_WORD = r'\b(\d{1,2})\s+de\s+' + MESES_RE + r'\s+de\s+(\d{4})\b'
+    DATE_NUM  = r'\b(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})\b'
+
+    def to_letras_from_word(m):
+        return f"{int(m.group(1)):02d} de {m.group(2).lower()} de {m.group(3)}"
+
+    def to_letras_from_num(m):
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            return f"{d:02d} de {MESES_STR[mo]} de {y}"
+        return None
+
     try:
         import pdfplumber
         text = ''
@@ -104,19 +117,39 @@ def extract_fecha_admite_from_pdf(pdf_path: Path) -> str | None:
     if not text.strip():
         return None
 
-    # Pattern 1: dd de mes de yyyy
-    m = re.search(r'\b(\d{1,2})\s+de\s+' + MESES_RE + r'\s+de\s+(\d{4})\b',
-                  text, re.IGNORECASE)
-    if m:
-        day, month_str, year = int(m.group(1)), m.group(2).lower(), int(m.group(3))
-        return f"{day:02d} de {month_str} de {year}"
+    # ── Strategy 1: date near admission keywords ──────────────────────────────
+    keywords = [
+        r'auto\s+(?:de\s+)?fecha',
+        r'adiado',
+        r'admiti[oó]',
+        r'se\s+admite',
+        r'auto\s+admisorio',
+        r'providencia\s+de\s+fecha',
+        r'resoluci[oó]n\s+de\s+fecha',
+        r'auto\s+del\s+d[ií]a',
+    ]
+    for kw in keywords:
+        # keyword → up to 120 chars → date (word form)
+        m = re.search(kw + r'(?:[^\n]{0,120}?)' + DATE_WORD, text, re.IGNORECASE | re.DOTALL)
+        if m:
+            return to_letras_from_word(m)
+        # keyword → up to 60 chars → date (numeric)
+        m = re.search(kw + r'(?:[^\n]{0,60}?)' + DATE_NUM, text, re.IGNORECASE)
+        if m:
+            result = to_letras_from_num(m)
+            if result:
+                return result
 
-    # Pattern 2: dd/mm/yyyy or dd-mm-yyyy
-    m = re.search(r'\b(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})\b', text)
+    # ── Strategy 2: first date in the full text (word form preferred) ─────────
+    m = re.search(DATE_WORD, text, re.IGNORECASE)
     if m:
-        day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        if 1 <= month <= 12 and 1 <= day <= 31:
-            return f"{day:02d} de {MESES_STR[month]} de {year}"
+        return to_letras_from_word(m)
+
+    m = re.search(DATE_NUM, text)
+    if m:
+        result = to_letras_from_num(m)
+        if result:
+            return result
 
     return None
 
@@ -408,7 +441,7 @@ def merge_pdfs(pdf_list: list, output_path: Path):
         writer.write(f)
 
 def build_separator_page(output_path: Path, text: str = 'DEMANDA'):
-    """Build a single-page PDF with text centered at mid-page (Caladea Bold 72pt)."""
+    """Build a single-page PDF with text centered at mid-page (Caladea Bold, auto-size)."""
     from reportlab.lib.pagesizes import letter
     from reportlab.pdfgen import canvas
     from reportlab.pdfbase import pdfmetrics
@@ -423,8 +456,15 @@ def build_separator_page(output_path: Path, text: str = 'DEMANDA'):
 
     w, h = letter
     c = canvas.Canvas(str(output_path), pagesize=letter)
-    c.setFont(font_name, 72)
-    text_w = c.stringWidth(text, font_name, 72)
+
+    # Auto-size: reduce font until text fits within margins (40pt each side)
+    font_size = 72
+    c.setFont(font_name, font_size)
+    while font_size > 20 and c.stringWidth(text, font_name, font_size) > w - 80:
+        font_size -= 4
+        c.setFont(font_name, font_size)
+
+    text_w = c.stringWidth(text, font_name, font_size)
     c.drawString((w - text_w) / 2, h / 2, text)
     c.save()
 
@@ -774,70 +814,110 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             except Exception as e:
                 log(f"  Error generando NP R{code}: {e}")
 
-            # 3c. Build legal email body
-            fecha_admite_display = fecha_admite_extracted or '(fecha pendiente)'
+            # 3c. Build legal email body (Quicksand 14pt, two versions)
             email_subject = f"R{code} Notificación personal - {radicado} - {nombre}"
-            email_body = (
-                f"<p>Señores,<br>Rappi S.A.S.<br>Felipe Villamarín Lafaurie</p>"
-                f"<p><strong>RADICADO:</strong> {radicado}<br>"
-                f"<strong>REFERENCIA:</strong> Demanda ordinaria laboral promovida por "
-                f"{nombre} en contra de Rappi SAS<br>"
-                f"<strong>ASUNTO:</strong> Notificación personal de auto admisorio de "
-                f"demanda ordinaria laboral de primera instancia.</p>"
-                f"<p>Reciban un cordial saludo. De manera atenta, conforme lo dispuesto "
-                f"por el artículo 8 de la Ley 2213 de 2022, nos permitimos notificarle "
-                f"el auto del {fecha_admite_display}, por medio del cual se admite la demanda "
-                f"que impetra nuestro cliente, {nombre}. A la presente se adjunta:</p>"
-                f"<ol>"
-                f"<li>Auto admisorio de la demanda.</li>"
-                f"<li>Notificación personal.</li>"
-                f"<li>Escrito de demanda.</li>"
-                f"<li>Prueba 1.1.1 (video)</li>"
-                f"<li>Pruebas documentales 1.1.2. a 1.1.16.</li>"
-                f"<li>Poder debidamente otorgado</li>"
-                f"<li>Anexos: Certificado de existencia y representación legal de la firma "
-                f"de abogados QPALLIANCE SAS, certificado de existencia y representación "
-                f"legal de Rappi SAS</li>"
-                f"<li>Proyecto de liquidación de pretensiones.</li>"
-                f"</ol>"
-            )
+            QS = "font-family:'Quicksand',Arial,sans-serif;font-size:14px;color:#222;line-height:1.7"
+            if fecha_admite_extracted:
+                email_body = (
+                    f'<div style="{QS}">'
+                    f'<p>Señores<br>Rappi S.A.S.<br>Felipe Villamarín Lafaurie</p>'
+                    f'<p><strong>RADICADO</strong>: {radicado}<br>'
+                    f'<strong>REFERENCIA:</strong> Demanda ordinaria laboral promovida por '
+                    f'<strong>{nombre}</strong> en contra de Rappi S.A.S.<br>'
+                    f'<strong>ASUNTO</strong>: Notificación personal de auto admisorio de '
+                    f'demanda ordinaria laboral de primera instancia</p>'
+                    f'<p>Reciban un cordial saludo.</p>'
+                    f'<p>De manera atenta, y en cumplimiento de lo dispuesto en el artículo 8 '
+                    f'de la Ley 2213 de 2022, nos permitimos notificarles el auto de fecha '
+                    f'<strong>{fecha_admite_extracted}</strong>, mediante el cual el '
+                    f'<strong>{juzgado}</strong> admitió la demanda ordinaria laboral presentada '
+                    f'por nuestro representado, el señor {nombre}, en contra de Rappi S.A.S.</p>'
+                    f'<p>Para los efectos legales correspondientes, junto con la presente '
+                    f'comunicación se remiten los documentos que hacen parte de la actuación '
+                    f'procesal y que permiten conocer integralmente el contenido de la providencia '
+                    f'y de la demanda presentada, incluyendo el auto admisorio, el escrito de '
+                    f'demanda con sus respectivos anexos y pruebas, el poder debidamente otorgado, '
+                    f'así como los certificados de existencia y representación legal de las partes '
+                    f'y el proyecto de liquidación de pretensiones elaborado para efectos '
+                    f'ilustrativos del proceso.</p>'
+                    f'<p>La presente notificación se realiza por este medio electrónico en los '
+                    f'términos previstos en la normativa vigente, con el fin de garantizar el '
+                    f'conocimiento oportuno de la providencia judicial y de la documentación que '
+                    f'integra la actuación.</p>'
+                    f'<p>Cordialmente,</p>'
+                    f'</div>'
+                )
+            else:
+                email_body = (
+                    f'<div style="{QS}">'
+                    f'<p>Señores<br>Rappi S.A.S.<br>Felipe Villamarín Lafaurie</p>'
+                    f'<p><strong>RADICADO</strong>: {radicado}<br>'
+                    f'<strong>REFERENCIA:</strong> Demanda ordinaria laboral promovida por '
+                    f'<strong>{nombre}</strong> en contra de Rappi S.A.S.<br>'
+                    f'<strong>ASUNTO</strong>: Notificación personal de auto admisorio de '
+                    f'demanda ordinaria laboral de primera instancia</p>'
+                    f'<p>Reciban un cordial saludo.</p>'
+                    f'<p>De manera atenta, y en cumplimiento de lo dispuesto en el artículo 8 '
+                    f'de la Ley 2213 de 2022, nos permitimos notificarles el auto por medio del '
+                    f'cual el <strong>{juzgado}</strong> admitió la demanda ordinaria laboral '
+                    f'presentada por nuestro representado, el señor {nombre}, en contra de '
+                    f'Rappi S.A.S.</p>'
+                    f'<p>Para los efectos legales correspondientes, junto con la presente '
+                    f'comunicación se remiten los documentos que hacen parte de la actuación '
+                    f'procesal y que permiten conocer integralmente el contenido de la providencia '
+                    f'y de la demanda presentada, incluyendo el auto admisorio, el escrito de '
+                    f'demanda con sus respectivos anexos y pruebas, el poder debidamente otorgado, '
+                    f'así como los certificados de existencia y representación legal de las partes '
+                    f'y el proyecto de liquidación de pretensiones elaborado para efectos '
+                    f'ilustrativos del proceso.</p>'
+                    f'<p>La presente notificación se realiza por este medio electrónico en los '
+                    f'términos previstos en la normativa vigente, con el fin de garantizar el '
+                    f'conocimiento oportuno de la providencia judicial y de la documentación que '
+                    f'integra la actuación.</p>'
+                    f'<p>Cordialmente,</p>'
+                    f'</div>'
+                )
 
-            # 3d. Build DEMANDA separator page
-            sep_pdf = job_dir / f"sep_{code}.pdf"
-            try:
-                build_separator_page(sep_pdf, 'DEMANDA')
-            except Exception as e:
-                log(f"  Error separador R{code}: {e}")
-                sep_pdf = None
-
-            # 3e. Build email demanda attachment: separator + demanda merged
-            email_demanda_pdf = None
-            if sep_pdf and sep_pdf.exists() and demanda_pdf:
-                email_demanda_pdf = job_dir / f"demanda_att_{code}.pdf"
+            # 3d. Build all 4 separator pages
+            def _sep(name):
+                p = job_dir / f"sep_{code}_{name}.pdf"
                 try:
-                    merge_pdfs([sep_pdf, demanda_pdf], email_demanda_pdf)
+                    build_separator_page(p, name)
+                    return p
                 except Exception as e:
-                    log(f"  Error merging demanda attachment R{code}: {e}")
-                    email_demanda_pdf = None
+                    log(f"  Error separador '{name}' R{code}: {e}")
+                    return None
 
-            # 3f. Send individual email with 3 attachments:
-            #     1) NP PDF, 2) Auto admisorio PDF, 3) Separator+Demanda PDF
+            sep_np    = _sep('NOTIFICACIÓN PERSONAL')
+            sep_aa    = _sep('AUTO ADMISORIO')
+            sep_comp  = _sep('Comprobante de notificación personal')
+            sep_dem   = _sep('DEMANDA')
+
+            # 3e. Send email FIRST (before proof) — single merged PDF attachment
+            # Build pre-proof assembly: NP_sep + NP + AA_sep + auto + DEM_sep + demanda
+            pre_proof_parts = [p for p in [sep_np, np_pdf, sep_aa, auto_pdf, sep_dem, demanda_pdf]
+                               if p is not None and Path(p).exists()]
+            email_att_pdf = None
+            if pre_proof_parts:
+                email_att_pdf = job_dir / f"R{code}_email.pdf"
+                try:
+                    merge_pdfs(pre_proof_parts, email_att_pdf)
+                except Exception as e:
+                    log(f"  Error construyendo adjunto email R{code}: {e}")
+                    email_att_pdf = None
+
             sent_ok  = False
             sent_msg = 'BREVO_API_KEY no configurada'
             if dest_email and BREVO_API_KEY:
                 log(f"  Enviando correo R{code} → {dest_email}...")
-                attachments = [
-                    np_pdf if (np_pdf and np_pdf.exists()) else None,
-                    auto_pdf,
-                    email_demanda_pdf,
-                ]
                 sent_ok, sent_msg = send_email_brevo(
-                    dest_email, dest_email, email_subject, email_body, attachments)
+                    dest_email, dest_email, email_subject, email_body,
+                    [email_att_pdf] if email_att_pdf else [])
                 log(f"  {'OK correo enviado' if sent_ok else 'Error correo'} R{code}: {sent_msg[:80]}")
             else:
                 log(f"  Email no enviado R{code} (BREVO_API_KEY no configurada)")
 
-            # 3g. Build email proof page
+            # 3f. Build constancia de envío (proof page)
             proof_pdf = job_dir / f"proof_{code}.pdf"
             try:
                 build_email_proof_pdf(proof_pdf, code, row,
@@ -847,23 +927,21 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
                 log(f"  Error constancia correo R{code}: {e}")
                 proof_pdf = None
 
-            # 3h. Merge final output PDF: NP → email proof → DEMANDA separator → demanda
-            parts = []
-            if np_pdf and np_pdf.exists():
-                parts.append(np_pdf)
-            if proof_pdf and proof_pdf.exists():
-                parts.append(proof_pdf)
-            if sep_pdf and sep_pdf.exists():
-                parts.append(sep_pdf)
-            if demanda_pdf:
-                parts.append(demanda_pdf)
+            # 3g. Merge final output PDF:
+            #   NP_sep → NP → AA_sep → auto → Comprobante_sep → proof → DEM_sep → demanda
+            final_parts = [p for p in [
+                sep_np, np_pdf,
+                sep_aa, auto_pdf,
+                sep_comp, proof_pdf,
+                sep_dem, demanda_pdf,
+            ] if p is not None and Path(p).exists()]
 
-            if parts:
+            if final_parts:
                 paquete_path = job_dir / f"R{code}.DDD.NP.done.pdf"
                 try:
-                    merge_pdfs(parts, paquete_path)
+                    merge_pdfs(final_parts, paquete_path)
                     paquetes.append(paquete_path)
-                    log(f"  OK R{code}.DDD.NP.done.pdf ({len(parts)} partes)")
+                    log(f"  OK R{code}.DDD.NP.done.pdf ({len(final_parts)} secciones)")
                 except Exception as e:
                     log(f"  Error ensamblando R{code}: {e}")
             else:
@@ -1080,29 +1158,71 @@ def dashboard(job_id):
     total    = job.get('total', 0)
     errores  = total - paquetes
 
-    # Build chart data
+    # KPI extras
+    aa_ok_count   = sum(1 for c in cases if c.get('procesó_aa', False))
+    sent_ok_count = sum(1 for c in cases if c.get('enviado', False))
+
+    # Chart 1: NPs by city
     ciudad_counts = {}
-    tramite_labels = []
-    tramite_data   = []
+    # Chart 2: avg days per city
+    ciudad_days = {}
+    all_days = []
 
     for c in cases:
         ciudad = c.get('Ciudad', 'N/A') or 'N/A'
         ciudad_counts[ciudad] = ciudad_counts.get(ciudad, 0) + 1
-
         fd = c.get('Fecha_Demanda', '')
         fa = c.get('fecha_admite_extracted', '')
         if fd and fa:
             d1 = parse_fecha(fd)
             d2 = parse_fecha(fa)
             if d1 and d2:
-                tramite_labels.append(f"R{c.get('code','')}")
-                tramite_data.append(abs((d2 - d1).days))
+                days = abs((d2 - d1).days)
+                all_days.append(days)
+                ciudad_days.setdefault(ciudad, []).append(days)
 
-    ciudad_labels = json.dumps(list(ciudad_counts.keys()))
-    ciudad_values = json.dumps(list(ciudad_counts.values()))
-    tram_labels   = json.dumps(tramite_labels)
-    tram_values   = json.dumps(tramite_data)
-    prom_dias     = round(sum(tramite_data) / len(tramite_data), 1) if tramite_data else 'N/A'
+    ciudad_labels_json = json.dumps(list(ciudad_counts.keys()))
+    ciudad_values_json = json.dumps(list(ciudad_counts.values()))
+
+    avg_cities = list(ciudad_days.keys())
+    avg_vals   = [round(sum(v) / len(v), 1) for v in ciudad_days.values()]
+    avg_labels_json = json.dumps(avg_cities)
+    avg_values_json = json.dumps(avg_vals)
+
+    prom_dias = round(sum(all_days) / len(all_days), 1) if all_days else 'N/A'
+
+    # Table rows
+    table_rows = ''
+    for c in cases:
+        code    = c.get('code', '')
+        nombre  = c.get('Nombre', '') or ''
+        juzgado = c.get('Juzgado', '') or ''
+        radicado= c.get('Radicado', '') or ''
+        fd      = c.get('Fecha_Demanda', '') or ''
+        fa      = c.get('fecha_admite_extracted', '') or ''
+        aa_ok   = c.get('procesó_aa', False)
+        flujo_ok= c.get('enviado', False)
+        tramite_str = '—'
+        if fd and fa:
+            d1 = parse_fecha(fd)
+            d2 = parse_fecha(fa)
+            if d1 and d2:
+                tramite_str = str(abs((d2 - d1).days)) + ' d'
+        aa_icon   = '<span class="ok-icon">✓</span>' if aa_ok   else '<span class="err-icon">✗</span>'
+        fl_icon   = '<span class="ok-icon">✓</span>' if flujo_ok else '<span class="err-icon">✗</span>'
+        table_rows += (
+            f'<tr>'
+            f'<td>R{code}</td>'
+            f'<td>{nombre}</td>'
+            f'<td class="small">{juzgado}</td>'
+            f'<td class="mono">{radicado}</td>'
+            f'<td>{fd}</td>'
+            f'<td>{fa or "—"}</td>'
+            f'<td class="center">{tramite_str}</td>'
+            f'<td class="center">{aa_icon}</td>'
+            f'<td class="center">{fl_icon}</td>'
+            f'</tr>\n'
+        )
 
     return f"""<!DOCTYPE html>
 <html lang="es">
@@ -1115,18 +1235,32 @@ def dashboard(job_id):
   body{{font-family:'Segoe UI',Arial,sans-serif;background:#0f0f1a;color:#e0e0e0;padding:28px}}
   h2{{color:#e91e8c;margin-bottom:4px;font-size:1.3rem}}
   .sub{{color:#888;font-size:.85rem;margin-bottom:24px}}
-  .kpi-row{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:28px}}
-  .kpi{{background:#1a1a2e;border-radius:12px;padding:18px 28px;min-width:140px;border:1px solid #2a2a3e}}
-  .kpi .num{{font-size:2.4rem;font-weight:800;color:#e91e8c;line-height:1}}
-  .kpi .lbl{{font-size:.8rem;color:#888;margin-top:6px;text-transform:uppercase;letter-spacing:.5px}}
+  .kpi-row{{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:28px}}
+  .kpi{{background:#1a1a2e;border-radius:12px;padding:16px 24px;min-width:120px;border:1px solid #2a2a3e}}
+  .kpi .num{{font-size:2.2rem;font-weight:800;color:#e91e8c;line-height:1}}
+  .kpi .lbl{{font-size:.75rem;color:#888;margin-top:6px;text-transform:uppercase;letter-spacing:.5px}}
   .kpi.ok .num{{color:#4caf50}}
   .kpi.err .num{{color:#f44336}}
-  .kpi.prom .num{{color:#ff9800;font-size:1.6rem}}
+  .kpi.prom .num{{color:#ff9800;font-size:1.5rem}}
+  .kpi.aa .num{{color:#ab47bc}}
+  .kpi.mail .num{{color:#42a5f5}}
   .charts{{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:28px}}
   .chart-box{{background:#1a1a2e;border-radius:12px;padding:20px;border:1px solid #2a2a3e}}
-  .chart-box h3{{color:#ccc;font-size:.95rem;margin-bottom:14px;font-weight:600}}
+  .chart-box h3{{color:#ccc;font-size:.93rem;margin-bottom:14px;font-weight:600}}
+  .tbl-wrap{{background:#1a1a2e;border-radius:12px;padding:20px;border:1px solid #2a2a3e;overflow-x:auto;margin-bottom:28px}}
+  .tbl-wrap h3{{color:#ccc;font-size:.93rem;margin-bottom:14px;font-weight:600}}
+  table{{width:100%;border-collapse:collapse;font-size:.82rem}}
+  thead tr{{background:#2a2a3e}}
+  th{{color:#aaa;font-weight:600;padding:8px 10px;text-align:left;white-space:nowrap;border-bottom:1px solid #3a3a4e}}
+  td{{padding:7px 10px;border-bottom:1px solid #1e1e30;vertical-align:middle}}
+  tr:hover td{{background:#23233a}}
+  .center{{text-align:center}}
+  .mono{{font-family:monospace;font-size:.8rem}}
+  .small{{font-size:.78rem}}
+  .ok-icon{{color:#4caf50;font-size:1rem;font-weight:700}}
+  .err-icon{{color:#f44336;font-size:1rem;font-weight:700}}
   .btn-row{{display:flex;gap:12px;margin-top:8px}}
-  .btn{{padding:10px 24px;border-radius:8px;border:none;cursor:pointer;font-size:.9rem;font-weight:600}}
+  .btn{{padding:10px 24px;border-radius:8px;border:none;cursor:pointer;font-size:.9rem;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:6px}}
   .btn-primary{{background:#e91e8c;color:#fff}}
   .btn-primary:hover{{background:#c4006a}}
   .btn-outline{{background:transparent;color:#e91e8c;border:2px solid #e91e8c}}
@@ -1151,9 +1285,17 @@ def dashboard(job_id):
     <div class="num">{errores}</div>
     <div class="lbl">Con error</div>
   </div>
+  <div class="kpi aa">
+    <div class="num">{aa_ok_count}</div>
+    <div class="lbl">AA Extraídos</div>
+  </div>
+  <div class="kpi mail">
+    <div class="num">{sent_ok_count}</div>
+    <div class="lbl">Emails Enviados</div>
+  </div>
   <div class="kpi prom">
     <div class="num">{prom_dias}</div>
-    <div class="lbl">Días promedio trámite</div>
+    <div class="lbl">Días prom. trámite</div>
   </div>
 </div>
 
@@ -1163,9 +1305,25 @@ def dashboard(job_id):
     <canvas id="chart-ciudad" height="220"></canvas>
   </div>
   <div class="chart-box">
-    <h3>Tiempo de Trámite por Caso (días)</h3>
+    <h3>Tiempo Promedio de Trámite por Ciudad (días)</h3>
     <canvas id="chart-tramite" height="220"></canvas>
   </div>
+</div>
+
+<div class="tbl-wrap">
+  <h3>Detalle de Procesos</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Código</th><th>Nombre</th><th>Juzgado</th><th>Radicado</th>
+        <th>Fec. Radicación</th><th>Fec. Auto Admisorio</th>
+        <th>Trámite</th><th>Estado AA</th><th>Estado Flujo</th>
+      </tr>
+    </thead>
+    <tbody>
+      {table_rows}
+    </tbody>
+  </table>
 </div>
 
 <div class="btn-row">
@@ -1174,44 +1332,46 @@ def dashboard(job_id):
 </div>
 
 <script>
-const PINK = '#e91e8c';
-const GREEN = '#4caf50';
-const chartDefaults = {{
-  plugins:{{legend:{{display:false}}}},
-  scales:{{
-    x:{{ticks:{{color:'#aaa',font:{{size:11}}}},grid:{{color:'#2a2a3e'}}}},
-    y:{{ticks:{{color:'#aaa',font:{{size:11}}}},grid:{{color:'#2a2a3e'}}}}
-  }}
+const PALETTE = ['#e91e8c','#9c27b0','#ff5722','#f06292','#673ab7','#ab47bc','#c4006a','#ff9800','#7b1fa2','#e91e63'];
+function barBg(n)  {{ return Array.from({{length:n}},(_,i)=>PALETTE[i%PALETTE.length]+'cc'); }}
+function barBrd(n) {{ return Array.from({{length:n}},(_,i)=>PALETTE[i%PALETTE.length]); }}
+
+const scaleOpts = {{
+  x:{{ticks:{{color:'#aaa',font:{{size:11}}}},grid:{{color:'#2a2a3e'}}}},
+  y:{{ticks:{{color:'#aaa',font:{{size:11}}}},grid:{{color:'#2a2a3e'}}}}
 }};
 
+const cityLabels = {ciudad_labels_json};
 new Chart(document.getElementById('chart-ciudad'), {{
   type: 'bar',
   data: {{
-    labels: {ciudad_labels},
+    labels: cityLabels,
     datasets: [{{
-      data: {ciudad_values},
-      backgroundColor: PINK + 'cc',
-      borderColor: PINK,
-      borderWidth: 1,
-      borderRadius: 6,
+      data: {ciudad_values_json},
+      backgroundColor: barBg(cityLabels.length),
+      borderColor:     barBrd(cityLabels.length),
+      borderWidth: 1, borderRadius: 6
     }}]
   }},
-  options: {{...chartDefaults}}
+  options: {{plugins:{{legend:{{display:false}}}},scales:scaleOpts}}
 }});
 
+const avgLabels = {avg_labels_json};
 new Chart(document.getElementById('chart-tramite'), {{
   type: 'bar',
   data: {{
-    labels: {tram_labels},
+    labels: avgLabels,
     datasets: [{{
-      data: {tram_values},
-      backgroundColor: GREEN + 'aa',
-      borderColor: GREEN,
-      borderWidth: 1,
-      borderRadius: 6,
+      data: {avg_values_json},
+      backgroundColor: barBg(avgLabels.length),
+      borderColor:     barBrd(avgLabels.length),
+      borderWidth: 1, borderRadius: 6
     }}]
   }},
-  options: {{...chartDefaults, plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label: ctx => ctx.raw + ' días'}}}}}}}}
+  options: {{
+    plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label:ctx=>ctx.raw+' días'}}}}}},
+    scales:scaleOpts
+  }}
 }});
 </script>
 </body>
@@ -1220,7 +1380,7 @@ new Chart(document.getElementById('chart-tramite'), {{
 
 @app.route('/resumen/<job_id>')
 def resumen(job_id):
-    """Printable summary with KPIs and charts (no individual table)."""
+    """Printable summary with KPIs, charts, and detail table."""
     job = JOBS.get(job_id)
     if not job:
         return "Job no encontrado", 404
@@ -1230,9 +1390,12 @@ def resumen(job_id):
     total    = job.get('total', 0)
     errores  = total - paquetes
 
+    aa_ok_count   = sum(1 for c in cases if c.get('procesó_aa', False))
+    sent_ok_count = sum(1 for c in cases if c.get('enviado', False))
+
     ciudad_counts = {}
-    tramite_labels = []
-    tramite_data   = []
+    ciudad_days   = {}
+    all_days      = []
     for c in cases:
         ciudad = c.get('Ciudad', 'N/A') or 'N/A'
         ciudad_counts[ciudad] = ciudad_counts.get(ciudad, 0) + 1
@@ -1242,15 +1405,51 @@ def resumen(job_id):
             d1 = parse_fecha(fd)
             d2 = parse_fecha(fa)
             if d1 and d2:
-                tramite_labels.append(f"R{c.get('code','')}")
-                tramite_data.append(abs((d2 - d1).days))
+                days = abs((d2 - d1).days)
+                all_days.append(days)
+                ciudad_days.setdefault(ciudad, []).append(days)
 
-    ciudad_labels = json.dumps(list(ciudad_counts.keys()))
-    ciudad_values = json.dumps(list(ciudad_counts.values()))
-    tram_labels   = json.dumps(tramite_labels)
-    tram_values   = json.dumps(tramite_data)
-    prom_dias     = round(sum(tramite_data) / len(tramite_data), 1) if tramite_data else 'N/A'
-    now_str       = datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+    ciudad_labels_json = json.dumps(list(ciudad_counts.keys()))
+    ciudad_values_json = json.dumps(list(ciudad_counts.values()))
+    avg_cities     = list(ciudad_days.keys())
+    avg_vals       = [round(sum(v)/len(v), 1) for v in ciudad_days.values()]
+    avg_labels_json = json.dumps(avg_cities)
+    avg_values_json = json.dumps(avg_vals)
+    prom_dias       = round(sum(all_days)/len(all_days), 1) if all_days else 'N/A'
+    now_str         = datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+
+    # Table rows (light theme)
+    table_rows = ''
+    for c in cases:
+        code    = c.get('code', '')
+        nombre  = c.get('Nombre', '') or ''
+        juzgado = c.get('Juzgado', '') or ''
+        radicado= c.get('Radicado', '') or ''
+        fd      = c.get('Fecha_Demanda', '') or ''
+        fa      = c.get('fecha_admite_extracted', '') or ''
+        aa_ok   = c.get('procesó_aa', False)
+        flujo_ok= c.get('enviado', False)
+        tramite_str = '—'
+        if fd and fa:
+            d1 = parse_fecha(fd)
+            d2 = parse_fecha(fa)
+            if d1 and d2:
+                tramite_str = str(abs((d2 - d1).days)) + ' d'
+        aa_icon  = '<span style="color:#2e7d32;font-weight:700">✓</span>' if aa_ok   else '<span style="color:#c62828;font-weight:700">✗</span>'
+        fl_icon  = '<span style="color:#2e7d32;font-weight:700">✓</span>' if flujo_ok else '<span style="color:#c62828;font-weight:700">✗</span>'
+        table_rows += (
+            f'<tr>'
+            f'<td>R{code}</td>'
+            f'<td>{nombre}</td>'
+            f'<td style="font-size:.78rem">{juzgado}</td>'
+            f'<td style="font-family:monospace;font-size:.78rem">{radicado}</td>'
+            f'<td>{fd}</td>'
+            f'<td>{fa or "—"}</td>'
+            f'<td style="text-align:center">{tramite_str}</td>'
+            f'<td style="text-align:center">{aa_icon}</td>'
+            f'<td style="text-align:center">{fl_icon}</td>'
+            f'</tr>\n'
+        )
 
     return f"""<!DOCTYPE html>
 <html lang="es">
@@ -1259,19 +1458,26 @@ def resumen(job_id):
 <title>Resumen NP — QPAlliance</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <style>
-  body{{font-family:'Segoe UI',Arial,sans-serif;background:#fff;color:#222;padding:32px;max-width:900px;margin:0 auto}}
+  body{{font-family:'Segoe UI',Arial,sans-serif;background:#fff;color:#222;padding:32px;max-width:1000px;margin:0 auto}}
   h1{{color:#D4006A;font-size:1.6rem;margin-bottom:4px}}
   .sub{{color:#888;font-size:.85rem;margin-bottom:24px}}
-  .kpi-row{{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:28px}}
-  .kpi{{background:#fff5f9;border:1px solid #D4006A33;border-radius:10px;padding:16px 24px;min-width:120px}}
-  .kpi .num{{font-size:2rem;font-weight:800;color:#D4006A}}
-  .kpi .lbl{{font-size:.78rem;color:#888;margin-top:4px;text-transform:uppercase;letter-spacing:.5px}}
+  .kpi-row{{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:28px}}
+  .kpi{{background:#fff5f9;border:1px solid #D4006A33;border-radius:10px;padding:14px 20px;min-width:110px}}
+  .kpi .num{{font-size:1.9rem;font-weight:800;color:#D4006A}}
+  .kpi .lbl{{font-size:.75rem;color:#888;margin-top:4px;text-transform:uppercase;letter-spacing:.5px}}
   .charts{{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:28px}}
   .chart-box{{border:1px solid #eee;border-radius:10px;padding:16px}}
   .chart-box h3{{color:#333;font-size:.9rem;margin-bottom:12px;font-weight:600}}
+  .tbl-section{{margin-bottom:28px}}
+  .tbl-section h3{{color:#333;font-size:.9rem;margin-bottom:10px;font-weight:600}}
+  table{{width:100%;border-collapse:collapse;font-size:.8rem}}
+  th{{background:#fce4f0;color:#9c0052;font-weight:600;padding:7px 9px;text-align:left;white-space:nowrap;border-bottom:2px solid #D4006A44}}
+  td{{padding:6px 9px;border-bottom:1px solid #f0f0f0;vertical-align:middle}}
+  tr:nth-child(even) td{{background:#fafafa}}
   .footer{{color:#aaa;font-size:.78rem;margin-top:32px;border-top:1px solid #eee;padding-top:12px}}
   .no-print{{margin-bottom:20px}}
-  @media print{{.no-print{{display:none}}}}
+  @media print{{.no-print{{display:none}};.charts{{grid-template-columns:1fr 1fr}}}}
+  @media(max-width:640px){{.charts{{grid-template-columns:1fr}}}}
 </style>
 </head>
 <body>
@@ -1286,7 +1492,9 @@ def resumen(job_id):
   <div class="kpi"><div class="num">{total}</div><div class="lbl">NP Procesadas</div></div>
   <div class="kpi"><div class="num">{paquetes}</div><div class="lbl">Exitosas</div></div>
   <div class="kpi"><div class="num">{errores}</div><div class="lbl">Con error</div></div>
-  <div class="kpi"><div class="num">{prom_dias}</div><div class="lbl">Días promedio trámite</div></div>
+  <div class="kpi"><div class="num">{aa_ok_count}</div><div class="lbl">AA Extraídos</div></div>
+  <div class="kpi"><div class="num">{sent_ok_count}</div><div class="lbl">Emails Enviados</div></div>
+  <div class="kpi"><div class="num">{prom_dias}</div><div class="lbl">Días prom. trámite</div></div>
 </div>
 
 <div class="charts">
@@ -1295,16 +1503,46 @@ def resumen(job_id):
     <canvas id="rc1" height="200"></canvas>
   </div>
   <div class="chart-box">
-    <h3>Tiempo de Trámite por Caso (días)</h3>
+    <h3>Tiempo Promedio de Trámite por Ciudad (días)</h3>
     <canvas id="rc2" height="200"></canvas>
   </div>
+</div>
+
+<div class="tbl-section">
+  <h3>Detalle de Procesos</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Código</th><th>Nombre</th><th>Juzgado</th><th>Radicado</th>
+        <th>Fec. Radicación</th><th>Fec. Auto Admisorio</th>
+        <th>Trámite</th><th>Estado AA</th><th>Estado Flujo</th>
+      </tr>
+    </thead>
+    <tbody>
+      {table_rows}
+    </tbody>
+  </table>
 </div>
 
 <div class="footer">Generado por Elena NP — QPAlliance — {hoy_str()}</div>
 
 <script>
-new Chart(document.getElementById('rc1'),{{type:'bar',data:{{labels:{ciudad_labels},datasets:[{{data:{ciudad_values},backgroundColor:'#D4006Acc',borderColor:'#D4006A',borderWidth:1,borderRadius:4}}]}},options:{{plugins:{{legend:{{display:false}}}},scales:{{x:{{ticks:{{font:{{size:10}}}}}},y:{{ticks:{{font:{{size:10}}}}}}}}}}}} );
-new Chart(document.getElementById('rc2'),{{type:'bar',data:{{labels:{tram_labels},datasets:[{{data:{tram_values},backgroundColor:'#4caf5099',borderColor:'#4caf50',borderWidth:1,borderRadius:4}}]}},options:{{plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label:ctx=>ctx.raw+' días'}}}}}},scales:{{x:{{ticks:{{font:{{size:10}}}}}},y:{{ticks:{{font:{{size:10}}}}}}}}}}}} );
+const PAL = ['#D4006A','#9c27b0','#ff5722','#f06292','#673ab7','#ab47bc','#c4006a','#ff9800','#7b1fa2','#e91e63'];
+function bg(n)  {{ return Array.from({{length:n}},(_,i)=>PAL[i%PAL.length]+'bb'); }}
+function brd(n) {{ return Array.from({{length:n}},(_,i)=>PAL[i%PAL.length]); }}
+const sc = {{x:{{ticks:{{font:{{size:10}}}}}},y:{{ticks:{{font:{{size:10}}}}}}}};
+const cityL = {ciudad_labels_json};
+new Chart(document.getElementById('rc1'),{{
+  type:'bar',
+  data:{{labels:cityL,datasets:[{{data:{ciudad_values_json},backgroundColor:bg(cityL.length),borderColor:brd(cityL.length),borderWidth:1,borderRadius:4}}]}},
+  options:{{plugins:{{legend:{{display:false}}}},scales:sc}}
+}});
+const avgL = {avg_labels_json};
+new Chart(document.getElementById('rc2'),{{
+  type:'bar',
+  data:{{labels:avgL,datasets:[{{data:{avg_values_json},backgroundColor:bg(avgL.length),borderColor:brd(avgL.length),borderWidth:1,borderRadius:4}}]}},
+  options:{{plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label:ctx=>ctx.raw+' días'}}}}}},scales:sc}}
+}});
 </script>
 </body>
 </html>"""
