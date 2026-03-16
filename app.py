@@ -584,9 +584,19 @@ def download(job_id):
     return send_file(str(zip_path), as_attachment=True,
                      download_name=zip_path.name)
 
-@app.route('/debug-excel', methods=['POST'])
+@app.route('/debug-excel', methods=['GET', 'POST'])
 def debug_excel():
     """Upload an Excel and get a JSON diagnostic: sheets, columns, sample codes."""
+    if request.method == 'GET':
+        return '''<!DOCTYPE html><html><head><title>Debug Excel</title>
+        <style>body{font-family:sans-serif;max-width:600px;margin:80px auto;background:#0a0a0a;color:#fff}
+        input,button{margin:10px 0;padding:10px;font-size:16px}button{background:#D4006A;color:#fff;border:none;cursor:pointer;border-radius:6px}
+        pre{background:#1a1a1a;padding:15px;border-radius:8px;overflow-x:auto;font-size:13px;max-height:500px;overflow-y:auto}</style></head>
+        <body><h2>Debug Excel — Elena NP</h2>
+        <form method="POST" enctype="multipart/form-data">
+        <p>Sube tu Excel de base de radicación:</p>
+        <input type="file" name="base_file" accept=".xlsx,.xls" required><br>
+        <button type="submit">Analizar</button></form></body></html>'''
     f = request.files.get('excel') or request.files.get('base_file')
     if not f:
         return jsonify({'error': 'Sube el Excel con campo "excel"'}), 400
