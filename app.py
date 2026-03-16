@@ -494,16 +494,16 @@ def process():
     job_dir = JOBS_DIR / job_id
     job_dir.mkdir(parents=True)
 
-    # Excel base
-    excel_file = request.files.get('excel')
+    # Excel base — acepta 'excel' o 'base_file' (nombre que usa el HTML)
+    excel_file = request.files.get('excel') or request.files.get('base_file')
     if not excel_file or not excel_file.filename:
         return jsonify({'error': 'Debe subir el archivo Excel de base.'}), 400
 
     excel_path = job_dir / 'base.xlsx'
     excel_file.save(str(excel_path))
 
-    # Autos PDFs (multiple)
-    autos_files = request.files.getlist('autos_pdfs')
+    # Autos PDFs — acepta 'autos_pdfs' o 'autos'
+    autos_files = request.files.getlist('autos_pdfs') or request.files.getlist('autos')
     autos_pdfs  = []
     autos_dir   = job_dir / 'autos'
     autos_dir.mkdir()
@@ -513,8 +513,8 @@ def process():
             f.save(str(p))
             autos_pdfs.append(p)
 
-    # Demandas PDFs (multiple)
-    demandas_files = request.files.getlist('demandas_pdfs')
+    # Demandas PDFs — acepta 'demandas_pdfs' o 'demandas'
+    demandas_files = request.files.getlist('demandas_pdfs') or request.files.getlist('demandas')
     demandas_pdfs  = []
     demandas_dir   = job_dir / 'demandas'
     demandas_dir.mkdir()
@@ -524,8 +524,8 @@ def process():
             f.save(str(p))
             demandas_pdfs.append(p)
 
-    # Destination email
-    dest_email = request.form.get('email', '').strip()
+    # Destination email — acepta 'email' o 'email_to'
+    dest_email = (request.form.get('email') or request.form.get('email_to') or '').strip()
 
     # 3. Register job
     JOBS[job_id] = {
