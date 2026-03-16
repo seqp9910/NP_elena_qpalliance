@@ -146,8 +146,10 @@ def parse_codigos(raw: str) -> list:
 
 def find_pdf_for_code(code: int, paths: list, all_codes: list = None) -> Path | None:
     """
-    Find a PDF whose filename contains the code number.
-    Fallback: if only 1 PDF and 1 code, assume it matches.
+    Find a PDF for a code using:
+      1. R{code} pattern in filename
+      2. Code digits anywhere in stem
+      3. Positional match: if N PDFs and N codes, match by index order
     """
     if not paths:
         return None
@@ -160,8 +162,16 @@ def find_pdf_for_code(code: int, paths: list, all_codes: list = None) -> Path | 
     for p in paths:
         if code_str in re.sub(r'\D', '', p.stem):
             return p
-    # Fallback: if only 1 file and 1 code being processed, assume it matches
-    if len(paths) == 1 and all_codes and len(all_codes) == 1:
+    # Priority 3: positional — if number of PDFs matches number of codes,
+    # map by index (sorted PDFs → sorted codes)
+    if all_codes and len(paths) == len(all_codes):
+        sorted_codes = sorted(all_codes)
+        sorted_paths = sorted(paths, key=lambda p: p.name)
+        if code in sorted_codes:
+            idx = sorted_codes.index(code)
+            return sorted_paths[idx]
+    # Priority 4: if only 1 PDF total, use it for any code
+    if len(paths) == 1:
         return paths[0]
     return None
 
