@@ -564,13 +564,21 @@ def status(job_id):
     job = JOBS.get(job_id)
     if not job:
         return jsonify({'error': 'Job no encontrado'}), 404
+    total    = job.get('total', len(job.get('codigos', [])))
+    step     = job.get('step', 0)
+    paquetes = job.get('paquetes', 0)
+    progress = int((step / 6) * 100) if step else 0
     return jsonify({
-        'status':   job['status'],
-        'step':     job.get('step', 0),
-        'log':      job.get('log', []),
-        'paquetes': job.get('paquetes', 0),
-        'total':    job.get('total', len(job.get('codigos', []))),
-        'error':    job.get('error', ''),
+        'status':    job['status'],
+        'step':      step,
+        'progress':  progress,
+        'messages':  job.get('log', []),
+        'log':       job.get('log', []),
+        'paquetes':  paquetes,
+        'sent':      paquetes,
+        'total':     total,
+        'error':     job.get('error', ''),
+        'dash_path': job['status'] == 'done',
     })
 
 @app.route('/download/<job_id>')

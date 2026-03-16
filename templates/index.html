@@ -432,15 +432,18 @@
   function showResult(data) {
     document.getElementById('progress-section').style.display = 'none';
     document.getElementById('result-section').style.display = 'block';
-    const sent = data.sent || 0;
+    const paquetes = data.paquetes || data.sent || 0;
     const total = data.total || 0;
-    document.getElementById('result-msg').textContent =
-      `Enviados: ${sent}/${total} correos. Descarga el ZIP con los archivos .done.`;
-
-    if (data.dash_path) {
-      document.getElementById('dashboard-section').style.display = 'block';
-      document.getElementById('dashboard-iframe').src = '/dashboard/' + currentJobId;
+    const logLines = (data.messages || data.log || []);
+    // Build result message with log details
+    let msgHtml = `<strong>${paquetes} paquete(s) generado(s) de ${total} código(s).</strong>`;
+    if (logLines.length) {
+      msgHtml += '<details style="margin-top:10px;font-size:12px;opacity:0.8"><summary>Ver log detallado</summary><pre style="max-height:200px;overflow-y:auto;background:#111;padding:8px;border-radius:4px">' + logLines.join('\n') + '</pre></details>';
     }
+    document.getElementById('result-msg').innerHTML = msgHtml;
+
+    document.getElementById('dashboard-section').style.display = 'block';
+    document.getElementById('dashboard-iframe').src = '/dashboard/' + currentJobId;
   }
 
   function showError(msg) {
