@@ -257,12 +257,68 @@ def parse_codigos(raw: str) -> list:
             result.append(int(m.group(1)))
     return list(dict.fromkeys(result))  # deduplicate preserving order
 
+_PROMPT_AA = (
+    'Este es un auto admisorio de una demanda laboral colombiana.\n'
+    'Necesito exactamente dos datos. Responde SOLO en este formato:\n'
+    'NOMBRE: [nombre completo de la parte DEMANDANTE]\n'
+    'FECHA: [DD de mes de YYYY]\n\n'
+    'Instrucciones:\n'
+    '- NOMBRE: busca la etiqueta "DEMANDANTE:", "Demandante:", "PARTE DEMANDANTE:", '
+    '"Accionante:" o similar. Copia el nombre completo que aparece ahí. '
+    'NO copies el nombre del demandado ni del juzgado.\n'
+    '- FECHA: fecha en que fue proferido o admitido el auto (no la de radicación).\n'
+    '- Si no encuentras un dato escribe NO_ENCONTRADO.\n'
+    '- Cero texto adicional fuera del formato.'
+)
+
+def _parse_aa_response(raw: str) -> dict:
+    """Parse NOMBRE/FECHA lines from Claude response."""
+    nombre = ''
+    fecha  = ''
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.upper().startswith('NOMBRE:'):
+            val = line[7:].strip()
+            if val and val.upper() != 'NO_ENCONTRADO':
+                nombre = val
+        elif line.upper().startswith('FECHA:'):
+            val = line[6:].strip()
+            if val and val.upper() != 'NO_ENCONTRADO':
+                fecha = val
+    return {'nombre': nombre, 'fecha': fecha}
+
+
+def _normalizar_fecha_letras(fecha_str: str) -> str:
+    """Normalize any date string to '05 de enero de 2025' format."""
+    MESES_RE  = '(' + '|'.join(MESES_STR[1:]) + ')'
+    DATE_WORD = r'(\d{1,2})\s+de\s+' + MESES_RE + r'\s+de\s+(\d{4})'
+    DATE_NUM  = r'(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})'
+    m = re.search(DATE_WORD, fecha_str, re.IGNORECASE)
+    if m:
+        return f"{int(m.group(1)):02d} de {m.group(2).lower()} de {m.group(3)}"
+    m = re.search(DATE_NUM, fecha_str)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            return f"{d:02d} de {MESES_STR[mo]} de {y}"
+    return fecha_str
+
+
+def _extract_ciudad_from_juzgado(juzgado: str) -> str:
+    """Extract city from 'Juzgado 14 Laboral del Circuito de Bogotá' → 'Bogotá'."""
+    if not juzgado:
+        return 'N/A'
+    m = re.search(r'\bde\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñA-ZÁÉÍÓÚÑ ]+?)\s*$', juzgado)
+    if m:
+        return m.group(1).strip()
+    return juzgado.strip()
+
+
 def scan_auto_admisorio(pdf_path: Path, log_fn=None) -> dict:
     """
-    One Claude vision call on an auto admisorio PDF.
-    Returns {'nombre': str, 'fecha': str} — either may be '' if not found.
-      nombre → full name of demandante   (used to match PDF → Excel code)
-      fecha  → admission date in Spanish  (used directly in the NP document)
+    Claude vision scan of an auto admisorio PDF.
+    Tries page 0 first; if nombre not found, tries page 1.
+    Returns {'nombre': str, 'fecha': str} — either may be ''.
     """
     def _log(msg):
         if log_fn:
@@ -271,66 +327,55 @@ def scan_auto_admisorio(pdf_path: Path, log_fn=None) -> dict:
     empty = {'nombre': '', 'fecha': ''}
     api_key = os.environ.get('ANTHROPIC_API_KEY', '')
     if not api_key:
-        _log("Sin ANTHROPIC_API_KEY — no se puede escanear")
+        _log("Sin ANTHROPIC_API_KEY")
         return empty
 
-    img_b64 = _pdf_page_to_base64(pdf_path, page_index=0)
-    if not img_b64:
-        _log("No se pudo renderizar la página del PDF")
-        return empty
+    def _call_claude(page_idx: int) -> dict:
+        img_b64 = _pdf_page_to_base64(pdf_path, page_index=page_idx)
+        if not img_b64:
+            return empty
+        try:
+            import anthropic as _anthropic
+            client = _anthropic.Anthropic(api_key=api_key)
+            msg = client.messages.create(
+                model='claude-haiku-4-5-20251001',
+                max_tokens=200,
+                messages=[{
+                    'role': 'user',
+                    'content': [
+                        {'type': 'image',
+                         'source': {'type': 'base64',
+                                    'media_type': 'image/png',
+                                    'data': img_b64}},
+                        {'type': 'text', 'text': _PROMPT_AA},
+                    ],
+                }],
+            )
+            raw = msg.content[0].text.strip()
+            _log(f"Pág {page_idx} → {raw[:100]}")
+            return _parse_aa_response(raw)
+        except Exception as e:
+            _log(f"Error API pág {page_idx}: {e}")
+            return empty
 
-    try:
-        import anthropic as _anthropic
-        client = _anthropic.Anthropic(api_key=api_key)
-        msg = client.messages.create(
-            model='claude-haiku-4-5-20251001',
-            max_tokens=150,
-            messages=[{
-                'role': 'user',
-                'content': [
-                    {
-                        'type': 'image',
-                        'source': {'type': 'base64', 'media_type': 'image/png', 'data': img_b64},
-                    },
-                    {
-                        'type': 'text',
-                        'text': (
-                            'Este es un auto admisorio de una demanda laboral colombiana.\n'
-                            'Extrae exactamente dos datos y responde en este formato:\n'
-                            'NOMBRE: [nombre completo del demandante]\n'
-                            'FECHA: [fecha del auto en formato: DD de mes de YYYY]\n\n'
-                            'Reglas:\n'
-                            '- NOMBRE: solo el nombre de quien demanda (demandante), no el demandado.\n'
-                            '- FECHA: la fecha en que fue proferido o admitido el auto.\n'
-                            '- Si no encuentras un dato escribe NO_ENCONTRADO en ese campo.\n'
-                            '- No agregues ningún texto adicional.'
-                        ),
-                    },
-                ],
-            }],
-        )
-        raw = msg.content[0].text.strip()
-        _log(f"IA respondió: {raw[:120]}")
+    # Try page 0
+    result = _call_claude(0)
 
-        nombre = ''
-        fecha  = ''
-        for line in raw.splitlines():
-            line = line.strip()
-            if line.upper().startswith('NOMBRE:'):
-                val = line[7:].strip()
-                if val.upper() != 'NO_ENCONTRADO' and val:
-                    nombre = val
-            elif line.upper().startswith('FECHA:'):
-                val = line[6:].strip()
-                if val.upper() != 'NO_ENCONTRADO' and val:
-                    fecha = val
+    # If nombre missing, try page 1
+    if not result.get('nombre'):
+        _log("Nombre no encontrado en pág 0, intentando pág 1...")
+        r1 = _call_claude(1)
+        if r1.get('nombre'):
+            result['nombre'] = r1['nombre']
+        if not result.get('fecha') and r1.get('fecha'):
+            result['fecha'] = r1['fecha']
 
-        _log(f"  → nombre='{nombre}'  fecha='{fecha}'")
-        return {'nombre': nombre, 'fecha': fecha}
+    # Normalize fecha to Spanish letters
+    if result.get('fecha'):
+        result['fecha'] = _normalizar_fecha_letras(result['fecha'])
 
-    except Exception as e:
-        _log(f"Error API Claude: {e}")
-        return empty
+    _log(f"  → nombre='{result.get('nombre','')}' | fecha='{result.get('fecha','')}'")
+    return result
 
 
 def _nombre_score(a: str, b: str) -> float:
@@ -410,7 +455,7 @@ def build_code_pdf_map(pdf_paths: list, excel_data: dict,
                         best_score = score
                         best_code  = code
 
-                if best_score >= 0.5:
+                if best_score >= 0.4:
                     matched_code = best_code
                     _log(f"{pdf_path.name} → R{matched_code} "
                          f"(nombre IA '{nombre_pdf}', score={best_score:.2f})")
@@ -496,26 +541,26 @@ def load_excel(excel_path: Path) -> dict:
     df = pd.read_excel(excel_path, sheet_name='Total', header=0)
 
     col_map = {}
-    for col in df.columns:
+    cols_list = list(df.columns)
+    for idx, col in enumerate(cols_list):
         norm = normalizar(str(col))
-        if norm == '#':
+        # Column B (index 1) with header '#' is always the case code
+        if norm == '#' or (idx == 1 and norm in ('#', 'num', 'numero', 'n', 'no', 'cod', 'codigo', '')):
             col_map['num'] = col
-        elif norm in ('num', 'numero', 'n', 'no') and 'num' not in col_map:
+        elif norm in ('num', 'numero') and 'num' not in col_map:
             col_map['num'] = col
-        elif norm in ('cod', 'codigo') and 'num' not in col_map:
-            col_map.setdefault('num', col)
-        elif 'nombre' in norm:
-            col_map.setdefault('nombre', col)
-        elif 'radicado' in norm:
-            col_map.setdefault('radicado', col)
-        elif 'ciudad' in norm:
-            col_map.setdefault('ciudad', col)
-        elif 'juzgado' in norm:
-            col_map.setdefault('juzgado', col)
-        elif 'fecha' in norm and 'demanda' in norm:
-            col_map.setdefault('fecha_demanda', col)
-        elif 'correo' in norm or 'email' in norm or 'electroni' in norm or 'direcc' in norm:
-            col_map.setdefault('email', col)
+        elif 'nombre' in norm and 'nombre' not in col_map:
+            col_map['nombre'] = col
+        elif 'radicado' in norm and 'radicado' not in col_map:
+            col_map['radicado'] = col
+        elif 'ciudad' in norm and 'ciudad' not in col_map:
+            col_map['ciudad'] = col
+        elif 'juzgado' in norm and 'juzgado' not in col_map:
+            col_map['juzgado'] = col
+        elif 'fecha' in norm and 'demanda' in norm and 'fecha_demanda' not in col_map:
+            col_map['fecha_demanda'] = col
+        elif ('correo' in norm or 'email' in norm or 'electroni' in norm) and 'email' not in col_map:
+            col_map['email'] = col
 
     result = {}
     num_col = col_map.get('num')
@@ -564,11 +609,15 @@ def load_excel(excel_path: Path) -> dict:
         else:
             fecha_demanda = ''
 
+        juzgado = get_col('juzgado')
+        # Ciudad: use explicit column if present, else extract from Juzgado name
+        ciudad = get_col('ciudad') or _extract_ciudad_from_juzgado(juzgado)
+
         result[code] = {
             'Nombre':        get_col('nombre'),
             'Radicado':      get_col('radicado'),
-            'Ciudad':        get_col('ciudad'),
-            'Juzgado':       get_col('juzgado'),
+            'Ciudad':        ciudad,
+            'Juzgado':       juzgado,
             'Fecha_Demanda': fecha_demanda,
             'email':         get_col('email'),
         }
