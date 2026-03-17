@@ -330,8 +330,10 @@ def scan_auto_admisorio(pdf_path: Path, log_fn=None) -> dict:
             log_fn(f"    [scan-AA] {msg}")
 
     empty = {'nombre': '', 'fecha': ''}
-    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
-    _log(f"Iniciando scan | API key: {'OK' if api_key else 'FALTA'} | {pdf_path.name}")
+    api_key = os.environ.get('ANTHROPIC_API_KEY', '').strip()
+    # Debug: list all env keys starting with ANTH (only first call)
+    anth_keys = [k for k in os.environ if 'ANTH' in k.upper()]
+    _log(f"Iniciando scan | API key: {'OK ('+str(len(api_key))+' chars)' if api_key else 'FALTA'} | vars ANTH: {anth_keys} | {pdf_path.name}")
     if not api_key:
         _log("ERROR: Sin ANTHROPIC_API_KEY — no se puede escanear")
         return empty
