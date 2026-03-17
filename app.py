@@ -479,6 +479,15 @@ def build_code_pdf_map(pdf_paths: list, excel_data: dict,
             if re.search(r'[Rr]0*' + str(code) + r'[\W_\.]', pdf_path.name + '.'):
                 matched_code = code
                 _log(f"{pdf_path.name} → R{code} (nombre archivo)")
+                # For auto type: still need to scan for fecha even when matched by filename
+                if doc_type == 'auto' and extracted_fechas is not None:
+                    scan = scan_auto_admisorio(pdf_path, log_fn=log_fn)
+                    fecha_pdf = scan.get('fecha', '')
+                    if fecha_pdf:
+                        extracted_fechas[matched_code] = fecha_pdf
+                        _log(f"  Fecha extraída para R{matched_code}: {fecha_pdf}")
+                    else:
+                        _log(f"  Sin fecha para R{matched_code} (P1 match)")
                 break
 
         # ── P2 auto: Claude reads nombre + fecha ─────────────────────────
