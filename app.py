@@ -331,8 +331,9 @@ def scan_auto_admisorio(pdf_path: Path, log_fn=None) -> dict:
 
     empty = {'nombre': '', 'fecha': ''}
     api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+    _log(f"Iniciando scan | API key: {'OK' if api_key else 'FALTA'} | {pdf_path.name}")
     if not api_key:
-        _log("Sin ANTHROPIC_API_KEY — no se puede escanear")
+        _log("ERROR: Sin ANTHROPIC_API_KEY — no se puede escanear")
         return empty
 
     # ── Strategy A: pdfplumber text extraction ────────────────────────────
@@ -466,11 +467,22 @@ def build_code_pdf_map(pdf_paths: list, excel_data: dict,
         if nombre:
             nombre_to_code[nombre] = code
 
+    # ── Pre-scan ALL auto PDFs before matching ────────────────────────────
+    # This ensures fecha is available regardless of which matching path (P1/P2/P3) wins.
+    pdf_scan_cache: dict[str, dict] = {}
+    if doc_type == 'auto':
+        _log(f"Pre-escaneando {len(pdf_paths)} auto(s) admisorio(s) con IA...")
+        for pp in pdf_paths:
+            pdf_scan_cache[str(pp)] = scan_auto_admisorio(pp, log_fn=log_fn)
+
     result: dict[int, Path] = {}
     unmatched_paths: list[Path] = []
 
     for pdf_path in pdf_paths:
         matched_code = None
+        cached = pdf_scan_cache.get(str(pdf_path), {})
+        nombre_pdf = cached.get('nombre', '')
+        fecha_pdf  = cached.get('fecha', '')
 
         # ── P1: R{code} in filename ───────────────────────────────────────
         for code in valid_codes:
@@ -479,25 +491,11 @@ def build_code_pdf_map(pdf_paths: list, excel_data: dict,
             if re.search(r'[Rr]0*' + str(code) + r'[\W_\.]', pdf_path.name + '.'):
                 matched_code = code
                 _log(f"{pdf_path.name} → R{code} (nombre archivo)")
-                # For auto type: still need to scan for fecha even when matched by filename
-                if doc_type == 'auto' and extracted_fechas is not None:
-                    scan = scan_auto_admisorio(pdf_path, log_fn=log_fn)
-                    fecha_pdf = scan.get('fecha', '')
-                    if fecha_pdf:
-                        extracted_fechas[matched_code] = fecha_pdf
-                        _log(f"  Fecha extraída para R{matched_code}: {fecha_pdf}")
-                    else:
-                        _log(f"  Sin fecha para R{matched_code} (P1 match)")
                 break
 
-        # ── P2 auto: Claude reads nombre + fecha ─────────────────────────
+        # ── P2 auto: match by demandante name ────────────────────────────
         if matched_code is None and doc_type == 'auto':
-            scan = scan_auto_admisorio(pdf_path, log_fn=log_fn)
-            nombre_pdf = scan.get('nombre', '')
-            fecha_pdf  = scan.get('fecha', '')
-
             if nombre_pdf:
-                # Find best name match in Excel
                 best_code  = None
                 best_score = 0.0
                 for excel_nombre, code in nombre_to_code.items():
@@ -512,13 +510,11 @@ def build_code_pdf_map(pdf_paths: list, excel_data: dict,
                     matched_code = best_code
                     _log(f"{pdf_path.name} → R{matched_code} "
                          f"(nombre IA '{nombre_pdf}', score={best_score:.2f})")
-                    # Store fecha for this code
-                    if extracted_fechas is not None and fecha_pdf:
-                        # Normalize to Spanish letters format
-                        extracted_fechas[matched_code] = fecha_pdf
                 else:
-                    _log(f"{pdf_path.name}: mejor score nombre={best_score:.2f} "
-                         f"('{nombre_pdf}') — insuficiente, fallback posicional")
+                    _log(f"{pdf_path.name}: score={best_score:.2f} insuficiente "
+                         f"(nombre='{nombre_pdf}') → fallback posicional")
+            else:
+                _log(f"{pdf_path.name}: sin nombre extraído → fallback posicional")
 
         # ── P2 demanda: code digits in stem (unique) ──────────────────────
         if matched_code is None and doc_type == 'demanda':
@@ -532,18 +528,27 @@ def build_code_pdf_map(pdf_paths: list, excel_data: dict,
 
         if matched_code is not None:
             result[matched_code] = pdf_path
+            # Store fecha for ANY matched code (P1, P2, or P3) if we have it
+            if doc_type == 'auto' and extracted_fechas is not None and fecha_pdf:
+                extracted_fechas[matched_code] = fecha_pdf
+                _log(f"  Fecha guardada R{matched_code}: {fecha_pdf}")
         else:
             unmatched_paths.append(pdf_path)
 
     # ── P3: positional for unmatched remainder ────────────────────────────
     unmatched_codes = sorted(c for c in valid_codes if c not in result)
     if unmatched_paths and unmatched_codes:
-        _log(f"⚠ Posicional (no se pudo identificar por contenido): "
-             f"{[p.name for p in unmatched_paths]} → {unmatched_codes}")
+        _log(f"⚠ Posicional: {[p.name for p in unmatched_paths]} → R{unmatched_codes}")
         for code, path in zip(unmatched_codes,
                               sorted(unmatched_paths, key=lambda p: p.name)):
             result[code] = path
-            _log(f"  {path.name} → R{code} (posicional)")
+            cached_p3 = pdf_scan_cache.get(str(path), {})
+            fecha_p3  = cached_p3.get('fecha', '')
+            if doc_type == 'auto' and extracted_fechas is not None and fecha_p3:
+                extracted_fechas[code] = fecha_p3
+                _log(f"  {path.name} → R{code} (posicional) | fecha: {fecha_p3}")
+            else:
+                _log(f"  {path.name} → R{code} (posicional) | sin fecha")
 
     return result
 
