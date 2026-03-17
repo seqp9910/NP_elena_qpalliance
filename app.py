@@ -316,8 +316,13 @@ def _extract_ciudad_from_juzgado(juzgado: str) -> str:
 
 def scan_auto_admisorio(pdf_path: Path, log_fn=None) -> dict:
     """
-    Claude vision scan of an auto admisorio PDF.
-    Tries page 0 first; if nombre not found, tries page 1.
+    Scan an auto admisorio PDF with Claude to extract demandante name + date.
+
+    Strategy A (digital PDFs): extract text with pdfplumber → send as text to
+                               Claude (faster, cheaper, no image rendering).
+    Strategy B (scanned PDFs): render pages as images → send to Claude vision.
+
+    Tries pages 0 and 1 before giving up.
     Returns {'nombre': str, 'fecha': str} — either may be ''.
     """
     def _log(msg):
@@ -327,12 +332,47 @@ def scan_auto_admisorio(pdf_path: Path, log_fn=None) -> dict:
     empty = {'nombre': '', 'fecha': ''}
     api_key = os.environ.get('ANTHROPIC_API_KEY', '')
     if not api_key:
-        _log("Sin ANTHROPIC_API_KEY")
+        _log("Sin ANTHROPIC_API_KEY — no se puede escanear")
         return empty
 
-    def _call_claude(page_idx: int) -> dict:
+    # ── Strategy A: pdfplumber text extraction ────────────────────────────
+    def _extract_text() -> str:
+        try:
+            import pdfplumber
+            text = ''
+            with pdfplumber.open(str(pdf_path)) as pdf:
+                for page in pdf.pages[:3]:
+                    t = page.extract_text() or ''
+                    text += t + '\n'
+            return text.strip()
+        except Exception:
+            return ''
+
+    def _call_claude_text(text: str) -> dict:
+        try:
+            import anthropic as _anthropic
+            client = _anthropic.Anthropic(api_key=api_key)
+            prompt = (
+                _PROMPT_AA + '\n\nTexto del documento:\n"""\n' +
+                text[:4000] + '\n"""'
+            )
+            msg = client.messages.create(
+                model='claude-haiku-4-5-20251001',
+                max_tokens=200,
+                messages=[{'role': 'user', 'content': prompt}],
+            )
+            raw = msg.content[0].text.strip()
+            _log(f"Texto → IA: {raw[:120]}")
+            return _parse_aa_response(raw)
+        except Exception as e:
+            _log(f"Error API texto: {e}")
+            return empty
+
+    # ── Strategy B: image (vision) ────────────────────────────────────────
+    def _call_claude_image(page_idx: int) -> dict:
         img_b64 = _pdf_page_to_base64(pdf_path, page_index=page_idx)
         if not img_b64:
+            _log(f"No se pudo renderizar pág {page_idx}")
             return empty
         try:
             import anthropic as _anthropic
@@ -352,25 +392,29 @@ def scan_auto_admisorio(pdf_path: Path, log_fn=None) -> dict:
                 }],
             )
             raw = msg.content[0].text.strip()
-            _log(f"Pág {page_idx} → {raw[:100]}")
+            _log(f"Imagen pág {page_idx} → IA: {raw[:120]}")
             return _parse_aa_response(raw)
         except Exception as e:
-            _log(f"Error API pág {page_idx}: {e}")
+            _log(f"Error API imagen pág {page_idx}: {e}")
             return empty
 
-    # Try page 0
-    result = _call_claude(0)
+    # Try text first
+    text = _extract_text()
+    if len(text) > 100:
+        _log(f"Texto extraído ({len(text)} chars) → usando Strategy A")
+        result = _call_claude_text(text)
+    else:
+        _log("PDF sin texto suficiente → usando Strategy B (visión)")
+        result = _call_claude_image(0)
+        if not result.get('nombre'):
+            _log("Pág 0 sin nombre, intentando pág 1...")
+            r1 = _call_claude_image(1)
+            if r1.get('nombre'):
+                result['nombre'] = r1['nombre']
+            if not result.get('fecha') and r1.get('fecha'):
+                result['fecha'] = r1['fecha']
 
-    # If nombre missing, try page 1
-    if not result.get('nombre'):
-        _log("Nombre no encontrado en pág 0, intentando pág 1...")
-        r1 = _call_claude(1)
-        if r1.get('nombre'):
-            result['nombre'] = r1['nombre']
-        if not result.get('fecha') and r1.get('fecha'):
-            result['fecha'] = r1['fecha']
-
-    # Normalize fecha to Spanish letters
+    # Normalize fecha format
     if result.get('fecha'):
         result['fecha'] = _normalizar_fecha_letras(result['fecha'])
 
@@ -1176,7 +1220,7 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             else:
                 log(f"  Sin fecha admisión para R{code} — modo sin fecha")
 
-            procesó_aa = (fecha_admite_extracted is not None)
+            procesó_aa = bool(fecha_admite_extracted)
 
             # 3b. Fill NP template → DOCX → PDF
             fill_data = {
