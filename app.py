@@ -257,20 +257,34 @@ def parse_codigos(raw: str) -> list:
             result.append(int(m.group(1)))
     return list(dict.fromkeys(result))  # deduplicate preserving order
 
-def extract_radicado_from_pdf(pdf_path: Path) -> str | None:
-    """Use Claude vision to extract the radicado number from a judicial PDF."""
+def scan_auto_admisorio(pdf_path: Path, log_fn=None) -> dict:
+    """
+    One Claude vision call on an auto admisorio PDF.
+    Returns {'nombre': str, 'fecha': str} — either may be '' if not found.
+      nombre → full name of demandante   (used to match PDF → Excel code)
+      fecha  → admission date in Spanish  (used directly in the NP document)
+    """
+    def _log(msg):
+        if log_fn:
+            log_fn(f"    [scan-AA] {msg}")
+
+    empty = {'nombre': '', 'fecha': ''}
     api_key = os.environ.get('ANTHROPIC_API_KEY', '')
     if not api_key:
-        return None
+        _log("Sin ANTHROPIC_API_KEY — no se puede escanear")
+        return empty
+
     img_b64 = _pdf_page_to_base64(pdf_path, page_index=0)
     if not img_b64:
-        return None
+        _log("No se pudo renderizar la página del PDF")
+        return empty
+
     try:
         import anthropic as _anthropic
         client = _anthropic.Anthropic(api_key=api_key)
         msg = client.messages.create(
             model='claude-haiku-4-5-20251001',
-            max_tokens=80,
+            max_tokens=150,
             messages=[{
                 'role': 'user',
                 'content': [
@@ -281,38 +295,73 @@ def extract_radicado_from_pdf(pdf_path: Path) -> str | None:
                     {
                         'type': 'text',
                         'text': (
-                            'Este es un documento judicial colombiano. '
-                            'Extrae el número de radicado completo del proceso '
-                            '(secuencia larga de dígitos, a veces con guiones, '
-                            'aparece como "Radicado:", "Radicación No.", "Proceso No." o similar). '
-                            'Responde SOLO con los dígitos del radicado sin espacios ni guiones. '
-                            'Si no encuentras ninguno, responde: NO_RADICADO'
+                            'Este es un auto admisorio de una demanda laboral colombiana.\n'
+                            'Extrae exactamente dos datos y responde en este formato:\n'
+                            'NOMBRE: [nombre completo del demandante]\n'
+                            'FECHA: [fecha del auto en formato: DD de mes de YYYY]\n\n'
+                            'Reglas:\n'
+                            '- NOMBRE: solo el nombre de quien demanda (demandante), no el demandado.\n'
+                            '- FECHA: la fecha en que fue proferido o admitido el auto.\n'
+                            '- Si no encuentras un dato escribe NO_ENCONTRADO en ese campo.\n'
+                            '- No agregues ningún texto adicional.'
                         ),
                     },
                 ],
             }],
         )
         raw = msg.content[0].text.strip()
-        if not raw or raw.upper() == 'NO_RADICADO':
-            return None
-        # Keep only digits
-        digits = re.sub(r'\D', '', raw)
-        return digits if len(digits) >= 6 else None
-    except Exception:
-        return None
+        _log(f"IA respondió: {raw[:120]}")
+
+        nombre = ''
+        fecha  = ''
+        for line in raw.splitlines():
+            line = line.strip()
+            if line.upper().startswith('NOMBRE:'):
+                val = line[7:].strip()
+                if val.upper() != 'NO_ENCONTRADO' and val:
+                    nombre = val
+            elif line.upper().startswith('FECHA:'):
+                val = line[6:].strip()
+                if val.upper() != 'NO_ENCONTRADO' and val:
+                    fecha = val
+
+        _log(f"  → nombre='{nombre}'  fecha='{fecha}'")
+        return {'nombre': nombre, 'fecha': fecha}
+
+    except Exception as e:
+        _log(f"Error API Claude: {e}")
+        return empty
+
+
+def _nombre_score(a: str, b: str) -> float:
+    """Token overlap similarity between two name strings (0.0–1.0)."""
+    ta = set(normalizar(a).split())
+    tb = set(normalizar(b).split())
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / max(len(ta), len(tb))
 
 
 def build_code_pdf_map(pdf_paths: list, excel_data: dict,
-                       valid_codes: list, log_fn=None) -> dict:
+                       valid_codes: list, log_fn=None,
+                       doc_type: str = 'demanda',
+                       extracted_fechas: dict = None) -> dict:
     """
-    Build a {code -> pdf_path} mapping in one pre-processing pass over all PDFs.
+    Build a {code -> pdf_path} mapping in one pre-processing pass.
 
-    Priority 1: R{code} or code digits in filename (no API cost).
-    Priority 2: Claude vision reads the radicado from the PDF and matches
-                it against the Radicado column in excel_data.
-    Priority 3: Positional (sorted codes → sorted PDFs) for any unmatched remainder.
+    doc_type='auto':
+      P1. Filename contains R{code}.
+      P2. Claude vision reads demandante name + fecha from the PDF;
+          name is matched against Nombre column in excel_data.
+          If extracted_fechas dict is provided, it is populated: {code: fecha_str}.
+      P3. Positional fallback.
 
-    Returns dict[int, Path] — one entry per code that could be matched.
+    doc_type='demanda':
+      P1. Filename contains R{code}.
+      P2. Code digits in filename (unique match only).
+      P3. Positional fallback.
+
+    Returns dict[int, Path].
     """
     def _log(msg):
         if log_fn:
@@ -321,31 +370,60 @@ def build_code_pdf_map(pdf_paths: list, excel_data: dict,
     if not pdf_paths:
         return {}
 
-    # Build radicado-digits → code lookup from Excel
-    radicado_to_code: dict[str, int] = {}
+    # Nombre → code lookup (for auto matching)
+    nombre_to_code: dict[str, int] = {}
     for code in valid_codes:
-        row = excel_data.get(code, {})
-        rad = re.sub(r'\D', '', str(row.get('Radicado', '')))
-        if len(rad) >= 6:
-            radicado_to_code[rad] = code
+        nombre = excel_data.get(code, {}).get('Nombre', '')
+        if nombre:
+            nombre_to_code[nombre] = code
 
-    result: dict[int, Path] = {}      # code → pdf_path
-    unmatched_paths: list[Path] = []  # PDFs not yet matched
+    result: dict[int, Path] = {}
+    unmatched_paths: list[Path] = []
 
     for pdf_path in pdf_paths:
         matched_code = None
 
-        # ── P1: filename contains R{code} ─────────────────────────────────
+        # ── P1: R{code} in filename ───────────────────────────────────────
         for code in valid_codes:
             if code in result:
                 continue
             if re.search(r'[Rr]0*' + str(code) + r'[\W_\.]', pdf_path.name + '.'):
                 matched_code = code
-                _log(f"{pdf_path.name} → R{code} (nombre)")
+                _log(f"{pdf_path.name} → R{code} (nombre archivo)")
                 break
 
-        # ── P1b: code digits anywhere in stem (unique match only) ─────────
-        if matched_code is None:
+        # ── P2 auto: Claude reads nombre + fecha ─────────────────────────
+        if matched_code is None and doc_type == 'auto':
+            scan = scan_auto_admisorio(pdf_path, log_fn=log_fn)
+            nombre_pdf = scan.get('nombre', '')
+            fecha_pdf  = scan.get('fecha', '')
+
+            if nombre_pdf:
+                # Find best name match in Excel
+                best_code  = None
+                best_score = 0.0
+                for excel_nombre, code in nombre_to_code.items():
+                    if code in result:
+                        continue
+                    score = _nombre_score(nombre_pdf, excel_nombre)
+                    if score > best_score:
+                        best_score = score
+                        best_code  = code
+
+                if best_score >= 0.5:
+                    matched_code = best_code
+                    _log(f"{pdf_path.name} → R{matched_code} "
+                         f"(nombre IA '{nombre_pdf}', score={best_score:.2f})")
+                    # Store fecha for this code
+                    if extracted_fechas is not None and fecha_pdf:
+                        # Normalize to Spanish letters format
+                        extracted_fechas[matched_code] = fecha_pdf
+                else:
+                    _log(f"{pdf_path.name}: mejor score nombre={best_score:.2f} "
+                         f"('{nombre_pdf}') — insuficiente, fallback posicional")
+
+        # ── P2 demanda: code digits in stem (unique) ──────────────────────
+        if matched_code is None and doc_type == 'demanda':
             candidates = [
                 c for c in valid_codes
                 if c not in result and str(c) in re.sub(r'\D', '', pdf_path.stem)
@@ -354,38 +432,18 @@ def build_code_pdf_map(pdf_paths: list, excel_data: dict,
                 matched_code = candidates[0]
                 _log(f"{pdf_path.name} → R{matched_code} (dígitos en nombre)")
 
-        # ── P2: Claude vision radicado extraction ─────────────────────────
-        if matched_code is None and radicado_to_code:
-            rad_digits = extract_radicado_from_pdf(pdf_path)
-            if rad_digits:
-                # Exact match
-                matched_code = radicado_to_code.get(rad_digits)
-                # Suffix match (last 10+ digits) if exact fails
-                if matched_code is None:
-                    for rad_key, code in radicado_to_code.items():
-                        if code in result:
-                            continue
-                        n = min(len(rad_digits), len(rad_key))
-                        if n >= 8 and rad_digits[-n:] == rad_key[-n:]:
-                            matched_code = code
-                            break
-                if matched_code is not None:
-                    _log(f"{pdf_path.name} → R{matched_code} (radicado IA: {rad_digits})")
-                else:
-                    _log(f"{pdf_path.name}: radicado IA '{rad_digits}' no coincide — fallback posicional")
-            else:
-                _log(f"{pdf_path.name}: sin radicado de IA — fallback posicional")
-
         if matched_code is not None:
             result[matched_code] = pdf_path
         else:
             unmatched_paths.append(pdf_path)
 
-    # ── P3: positional for any remaining unmatched PDFs ───────────────────
+    # ── P3: positional for unmatched remainder ────────────────────────────
     unmatched_codes = sorted(c for c in valid_codes if c not in result)
     if unmatched_paths and unmatched_codes:
-        _log(f"Posicional: {[p.name for p in unmatched_paths]} → {unmatched_codes}")
-        for code, path in zip(unmatched_codes, sorted(unmatched_paths, key=lambda p: p.name)):
+        _log(f"⚠ Posicional (no se pudo identificar por contenido): "
+             f"{[p.name for p in unmatched_paths]} → {unmatched_codes}")
+        for code, path in zip(unmatched_codes,
+                              sorted(unmatched_paths, key=lambda p: p.name)):
             result[code] = path
             _log(f"  {path.name} → R{code} (posicional)")
 
@@ -425,17 +483,17 @@ def load_excel(excel_path: Path) -> dict:
         wb = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
         sheets = wb.sheetnames
         wb.close()
-    except Exception:
-        sheets = []
+    except Exception as e:
+        raise ValueError(f"No se pudo abrir el archivo Excel: {e}")
 
-    if 'Total' in sheets:
-        sheet_name = 'Total'
-    elif sheets:
-        sheet_name = sheets[0]
-    else:
-        sheet_name = 0
+    if 'Total' not in sheets:
+        raise ValueError(
+            f"El archivo Excel no tiene una hoja llamada 'Total'. "
+            f"Hojas encontradas: {sheets}. "
+            f"Por favor verifica que el archivo tenga una hoja 'Total'."
+        )
 
-    df = pd.read_excel(excel_path, sheet_name=sheet_name, header=0)
+    df = pd.read_excel(excel_path, sheet_name='Total', header=0)
 
     col_map = {}
     for col in df.columns:
@@ -1019,8 +1077,11 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
         log(f"  Autos subidos: {[p.name for p in autos_pdfs]}")
         log(f"  Demandas subidas: {[p.name for p in demandas_pdfs]}")
 
-        auto_map    = build_code_pdf_map(autos_pdfs,    excel_data, found, log_fn=log)
-        demanda_map = build_code_pdf_map(demandas_pdfs, excel_data, found, log_fn=log)
+        extracted_fechas: dict = {}   # populated by scan_auto_admisorio via build_code_pdf_map
+        auto_map    = build_code_pdf_map(autos_pdfs,    excel_data, found, log_fn=log,
+                                         doc_type='auto', extracted_fechas=extracted_fechas)
+        demanda_map = build_code_pdf_map(demandas_pdfs, excel_data, found, log_fn=log,
+                                         doc_type='demanda')
 
         valid_codes = []
         for code in found:
@@ -1058,13 +1119,13 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             auto_pdf    = auto_map[code]
             demanda_pdf = demanda_map[code]
 
-            # 3a. Extract fecha_admite from auto admisorio PDF
-            fecha_admite_extracted = extract_fecha_admite_from_pdf(auto_pdf, log_fn=log)
-            no_date_mode = (fecha_admite_extracted is None)
+            # 3a. Fecha admite: already extracted during PDF matching (scan_auto_admisorio)
+            fecha_admite_extracted = extracted_fechas.get(code) or ''
+            no_date_mode = not bool(fecha_admite_extracted)
             if fecha_admite_extracted:
                 log(f"  Fecha admisión R{code}: {fecha_admite_extracted}")
             else:
-                log(f"  No se pudo extraer fecha admisión de R{code} PDF — modo sin fecha")
+                log(f"  Sin fecha admisión para R{code} — modo sin fecha")
 
             procesó_aa = (fecha_admite_extracted is not None)
 
