@@ -6,6 +6,17 @@ Pipeline de Notificaciones Personales para QPAlliance
 import os, re, json, uuid, threading, datetime, shutil, subprocess
 import unicodedata, base64, zipfile, io, sys, time
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+_TZ_BOG = ZoneInfo('America/Bogota')
+
+def _now_bog() -> datetime.datetime:
+    """Current datetime in Bogotá time (UTC-5)."""
+    return datetime.datetime.now(_TZ_BOG)
+
+def _today_bog() -> datetime.date:
+    """Current date in Bogotá time."""
+    return _now_bog().date()
 from flask import Flask, request, jsonify, render_template, send_file, Response
 
 # ─── APP SETUP ───────────────────────────────────────────────────────────────
@@ -34,7 +45,7 @@ except Exception:
 def hoy_str():
     m = ['','enero','febrero','marzo','abril','mayo','junio',
          'julio','agosto','septiembre','octubre','noviembre','diciembre']
-    t = datetime.date.today()
+    t = _today_bog()
     return f"{t.day:02d} de {m[t.month]} de {t.year}"
 
 MESES_STR = ['', 'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
@@ -940,7 +951,7 @@ def build_email_proof_pdf(output_path: Path, code: int, client: dict,
 
     fields = [
         ('Estado',       f'<font color="{status_color}"><b>{status_text}</b></font>'),
-        ('Fecha y hora', datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')),
+        ('Fecha y hora', _now_bog().strftime('%d/%m/%Y %H:%M:%S')),
         ('De',           SENDER_EMAIL),
         ('Para',         to_email),
         ('Asunto',       email_subject),
@@ -1858,7 +1869,7 @@ def resumen(job_id):
     avg_labels_json = json.dumps(avg_cities)
     avg_values_json = json.dumps(avg_vals)
     prom_dias       = round(sum(all_days)/len(all_days), 1) if all_days else 'N/A'
-    now_str         = datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')
+    now_str         = _now_bog().strftime('%d/%m/%Y %H:%M:%S')
 
     # Table rows (light theme)
     table_rows = ''
