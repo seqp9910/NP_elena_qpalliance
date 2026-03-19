@@ -6,22 +6,11 @@ Pipeline de Notificaciones Personales para QPAlliance
 import os, re, json, uuid, threading, datetime, shutil, subprocess
 import unicodedata, base64, zipfile, io, sys, time
 from pathlib import Path
-from zoneinfo import ZoneInfo
-
-_TZ_BOG = ZoneInfo('America/Bogota')
-
-def _now_bog() -> datetime.datetime:
-    """Current datetime in Bogotá time (UTC-5)."""
-    return datetime.datetime.now(_TZ_BOG)
-
-def _today_bog() -> datetime.date:
-    """Current date in Bogotá time."""
-    return _now_bog().date()
 from flask import Flask, request, jsonify, render_template, send_file, Response
 
 # ─── APP SETUP ───────────────────────────────────────────────────────────────
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB — soporta lotes grandes
 
 BASE_DIR   = Path(__file__).parent
 ASSETS_DIR = BASE_DIR / 'assets'
@@ -45,7 +34,7 @@ except Exception:
 def hoy_str():
     m = ['','enero','febrero','marzo','abril','mayo','junio',
          'julio','agosto','septiembre','octubre','noviembre','diciembre']
-    t = _today_bog()
+    t = datetime.date.today()
     return f"{t.day:02d} de {m[t.month]} de {t.year}"
 
 MESES_STR = ['', 'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
@@ -813,35 +802,54 @@ def docx_to_pdf(docx_path: Path, output_dir: Path) -> Path:
         )
     return pdf_path
 
-def add_code_to_docx_header(docx_path: Path, code: int):
+def bold_filled_values(docx_path, fill_data: dict):
+    """Bold all filled-in variable values in the DOCX output.
+    Uses whole-paragraph bolding when the paragraph text contains any filled value,
+    so names split across multiple runs are always fully bolded.
+    """
+    from docx import Document
+    doc = Document(str(docx_path))
+    values_to_bold = [v.strip() for v in fill_data.values() if v and isinstance(v, str) and len(v) > 1]
+
+    def _bold_para(para):
+        full_text = ''.join(r.text for r in para.runs)
+        for val in values_to_bold:
+            if val in full_text:
+                # Bold every run in the paragraph that contains any token of the value
+                tokens = [tok for tok in val.split() if len(tok) > 2]
+                for run in para.runs:
+                    if run.text:
+                        if val in run.text or any(tok in run.text for tok in tokens):
+                            run.bold = True
+                break  # one match per paragraph is enough
+
+    for para in doc.paragraphs:
+        _bold_para(para)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    _bold_para(para)
+    doc.save(str(docx_path))
+
+
+def add_code_to_docx_header(docx_path, code):
     """Add R{code} bold size-20 right-aligned to the first-page header of the DOCX."""
     from docx import Document
     from docx.shared import Pt
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-
     doc = Document(str(docx_path))
     section = doc.sections[0]
-
-    # Enable different first page header
     section.different_first_page_header_footer = True
-
-    # Write to first-page header
     header = section.first_page_header
-    # Clear existing content
     for para in header.paragraphs:
         for run in para.runs:
             run.text = ''
-
-    if header.paragraphs:
-        p = header.paragraphs[0]
-    else:
-        p = header.add_paragraph()
-
+    p = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     run = p.add_run(f'R{code}')
     run.bold = True
-    run.font.size = Pt(20)
-
+    run.font.size = Pt(22)
     doc.save(str(docx_path))
 
 
@@ -983,7 +991,7 @@ def build_email_proof_pdf(output_path: Path, code: int, client: dict,
 
     fields = [
         ('Estado',       f'<font color="{status_color}"><b>{status_text}</b></font>'),
-        ('Fecha y hora', _now_bog().strftime('%d/%m/%Y %H:%M:%S')),
+        ('Fecha y hora', datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')),
         ('De',           SENDER_EMAIL),
         ('Para',         to_email),
         ('Asunto',       email_subject),
@@ -1294,6 +1302,7 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             try:
                 fill_template(template_path, fill_data, docx_out,
                               no_date_mode=no_date_mode)
+                bold_filled_values(docx_out, fill_data)
                 add_code_to_docx_header(docx_out, code)
                 np_pdf = docx_to_pdf(docx_out, job_dir)
                 log(f"  OK NP generada: R{code} - {nombre}")
@@ -1303,7 +1312,7 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             # 3c. Build legal email body (Cambria 14pt, variables en negrilla)
             email_subject = f"R{code} Notificación personal - {radicado} - {nombre}"
             CB = "font-family:'Cambria','Georgia',serif;font-size:14px;color:#222;line-height:1.7"
-            _header_block = (
+            _hdr = (
                 f'<p>Señores<br>Rappi S.A.S.<br>Felipe Villamarín Lafaurie</p>'
                 f'<p><strong>RADICADO</strong>: <strong>{radicado}</strong><br>'
                 f'<strong>REFERENCIA:</strong> Demanda ordinaria laboral promovida por '
@@ -1312,7 +1321,7 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
                 f'demanda ordinaria laboral de primera instancia</p>'
                 f'<p>Reciban un cordial saludo.</p>'
             )
-            _footer_block = (
+            _ftr = (
                 f'<p>Para los efectos legales correspondientes, junto con la presente '
                 f'comunicación se remiten los documentos que hacen parte de la actuación '
                 f'procesal y que permiten conocer integralmente el contenido de la providencia '
@@ -1329,26 +1338,23 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             )
             if fecha_admite_extracted:
                 email_body = (
-                    f'<div style="{CB}">'
-                    + _header_block +
+                    f'<div style="{CB}">' + _hdr +
                     f'<p>De manera atenta, y en cumplimiento de lo dispuesto en el artículo 8 '
                     f'de la Ley 2213 de 2022, nos permitimos notificarles el auto de fecha '
                     f'<strong>{fecha_admite_extracted}</strong>, mediante el cual el '
                     f'<strong>{juzgado}</strong> admitió la demanda ordinaria laboral presentada '
                     f'por nuestro representado, el señor <strong>{nombre}</strong>, en contra de Rappi S.A.S.</p>'
-                    + _footer_block +
-                    f'</div>'
+                    + _ftr + f'</div>'
                 )
             else:
                 email_body = (
-                    f'<div style="{CB}">'
-                    + _header_block +
+                    f'<div style="{CB}">' + _hdr +
                     f'<p>De manera atenta, y en cumplimiento de lo dispuesto en el artículo 8 '
                     f'de la Ley 2213 de 2022, nos permitimos notificarles el auto por medio del '
                     f'cual el <strong>{juzgado}</strong> admitió la demanda ordinaria laboral '
                     f'presentada por nuestro representado, el señor <strong>{nombre}</strong>, en contra de '
                     f'Rappi S.A.S.</p>'
-                    + _footer_block +
+                    + _ftr + f'</div>'
                     f'</div>'
                 )
 
@@ -1411,11 +1417,11 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             ] if p is not None and Path(p).exists()]
 
             if final_parts:
-                paquete_path = job_dir / f"R{code}.DDD.NP.done.pdf"
+                paquete_path = job_dir / f"R{code}_DDD_NP_done.pdf"
                 try:
                     merge_pdfs(final_parts, paquete_path)
                     paquetes.append(paquete_path)
-                    log(f"  OK R{code}.DDD.NP.done.pdf ({len(final_parts)} secciones)")
+                    log(f"  OK R{code}_DDD_NP_done.pdf ({len(final_parts)} secciones)")
                 except Exception as e:
                     log(f"  Error ensamblando R{code}: {e}")
             else:
@@ -1890,7 +1896,7 @@ def resumen(job_id):
     avg_labels_json = json.dumps(avg_cities)
     avg_values_json = json.dumps(avg_vals)
     prom_dias       = round(sum(all_days)/len(all_days), 1) if all_days else 'N/A'
-    now_str         = _now_bog().strftime('%d/%m/%Y %H:%M:%S')
+    now_str         = datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')
 
     # Table rows (light theme)
     table_rows = ''
