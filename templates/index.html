@@ -133,6 +133,39 @@
       display:inline-block;background:#1a0010;border:1px solid #D4006A44;
       color:#D4006A;border-radius:12px;padding:2px 10px;font-size:0.75rem;margin-left:8px;
     }
+
+    /* ── WELCOME SCREEN ── */
+    #welcome-screen{
+      max-width:700px;margin:60px auto 0;padding:0 20px;
+      animation:fadeIn .5s ease;
+    }
+    @keyframes fadeIn{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+    .welcome-title{
+      font-size:1.85rem;font-weight:700;color:#fff;line-height:1.25;
+      margin-bottom:10px;
+    }
+    .welcome-title span{color:#D4006A}
+    .welcome-subtitle{color:#888;font-size:0.95rem;margin-bottom:36px;line-height:1.6}
+    .welcome-card{
+      background:#111;border:1px solid #222;border-radius:14px;
+      padding:28px;margin-bottom:16px;
+    }
+    .welcome-card h4{
+      color:#D4006A;font-size:0.98rem;font-weight:600;
+      margin-bottom:10px;display:flex;align-items:center;gap:10px;
+    }
+    .welcome-card p{color:#999;font-size:0.88rem;line-height:1.65;margin:0}
+    .welcome-card p strong{color:#e0e0e0}
+    .welcome-steps{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:32px}
+    @media(max-width:560px){.welcome-steps{grid-template-columns:1fr}}
+    .welcome-cta{display:flex;justify-content:center;margin-top:8px;margin-bottom:60px}
+    .btn-cta{
+      background:#D4006A;color:#fff;border:none;cursor:pointer;
+      font-size:1.1rem;font-weight:700;padding:16px 52px;border-radius:10px;
+      transition:all .2s;letter-spacing:.3px;
+      box-shadow:0 0 24px #D4006A44;
+    }
+    .btn-cta:hover{background:#b0005a;transform:translateY(-2px);box-shadow:0 0 32px #D4006A66}
   </style>
 </head>
 <body>
@@ -145,6 +178,48 @@
 </header>
 
 <main>
+  <!-- ══ PANTALLA DE BIENVENIDA ══ -->
+  <div id="welcome-screen">
+    <div class="welcome-title">Bienvenido al automatizador de<br><span>Notificaciones Personales</span> de QPAlliance</div>
+    <p class="welcome-subtitle">
+      Esta herramienta procesa y envía notificaciones personales de autos admisorios de forma automática,
+      generando los PDFs finales, correos electrónicos y un dashboard completo para cada lote de trabajo.
+    </p>
+
+    <div class="welcome-steps">
+      <div class="welcome-card">
+        <h4>📋 Paso 1 — Códigos del lote</h4>
+        <p>Ingresa los <strong>códigos de radicación</strong> de los casos que deseas procesar, separados por punto y coma.</p>
+      </div>
+      <div class="welcome-card">
+        <h4>📂 Paso 2 — Archivos requeridos</h4>
+        <p>Sube la <strong>base de datos Excel</strong> con la información de cada radicado del lote.</p>
+      </div>
+      <div class="welcome-card">
+        <h4>📄 Paso 3 — Documentos legales</h4>
+        <p>Adjunta los <strong>autos admisorios</strong> y las <strong>demandas</strong> en formato PDF, uno por radicado.</p>
+      </div>
+      <div class="welcome-card">
+        <h4>📧 Paso 4 — Correo de envío</h4>
+        <p>Confirma el <strong>correo destino</strong> al que se enviarán los paquetes de notificación generados.</p>
+      </div>
+      <div class="welcome-card">
+        <h4>🚀 Paso 5 — Generación</h4>
+        <p>El sistema procesa todos los casos automáticamente y genera los <strong>PDFs finales (.done)</strong> listos para descargar.</p>
+      </div>
+      <div class="welcome-card">
+        <h4>📊 Dashboard</h4>
+        <p>Al finalizar, obtendrás un <strong>reporte visual</strong> con el estado de cada notificación procesada en el lote.</p>
+      </div>
+    </div>
+
+    <div class="welcome-cta">
+      <button class="btn-cta" onclick="showWizard()">📂 Cargar lote</button>
+    </div>
+  </div>
+
+  <!-- ══ WIZARD (oculto hasta hacer clic en Cargar lote) ══ -->
+  <div id="wizard-container" style="display:none">
   <h2>Notificaciones Personales</h2>
   <p class="subtitle">Procesa y envía autos admisorios automáticamente en pocos pasos.</p>
 
@@ -271,12 +346,20 @@
     <iframe id="dashboard-iframe" src="" frameborder="0"></iframe>
   </div>
 
+  </div><!-- /wizard-container -->
+
 </main>
 
 <script>
   let currentStep = 1;
   let currentJobId = null;
   let pollInterval = null;
+
+  // ── WELCOME → WIZARD ─────────────────────────────────────
+  function showWizard() {
+    document.getElementById('welcome-screen').style.display = 'none';
+    document.getElementById('wizard-container').style.display = 'block';
+  }
 
   // ── CÓDIGO PREVIEW ───────────────────────────────────────
   function previewCodigos() {
@@ -499,6 +582,10 @@
     currentStep = 1;
     document.getElementById('step-1').classList.add('visible');
     document.getElementById('dot-1').classList.add('active');
+
+    // Volver a la pantalla de bienvenida
+    document.getElementById('wizard-container').style.display = 'none';
+    document.getElementById('welcome-screen').style.display = 'block';
 
     // Clear inputs
     document.getElementById('codigos').value = '';
