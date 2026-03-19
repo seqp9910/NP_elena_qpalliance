@@ -813,6 +813,38 @@ def docx_to_pdf(docx_path: Path, output_dir: Path) -> Path:
         )
     return pdf_path
 
+def add_code_to_docx_header(docx_path: Path, code: int):
+    """Add R{code} bold size-20 right-aligned to the first-page header of the DOCX."""
+    from docx import Document
+    from docx.shared import Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document(str(docx_path))
+    section = doc.sections[0]
+
+    # Enable different first page header
+    section.different_first_page_header_footer = True
+
+    # Write to first-page header
+    header = section.first_page_header
+    # Clear existing content
+    for para in header.paragraphs:
+        for run in para.runs:
+            run.text = ''
+
+    if header.paragraphs:
+        p = header.paragraphs[0]
+    else:
+        p = header.add_paragraph()
+
+    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    run = p.add_run(f'R{code}')
+    run.bold = True
+    run.font.size = Pt(20)
+
+    doc.save(str(docx_path))
+
+
 def merge_pdfs(pdf_list: list, output_path: Path):
     """Merge list of PDF paths into a single PDF using pypdf."""
     from pypdf import PdfWriter
@@ -1262,72 +1294,61 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             try:
                 fill_template(template_path, fill_data, docx_out,
                               no_date_mode=no_date_mode)
+                add_code_to_docx_header(docx_out, code)
                 np_pdf = docx_to_pdf(docx_out, job_dir)
                 log(f"  OK NP generada: R{code} - {nombre}")
             except Exception as e:
                 log(f"  Error generando NP R{code}: {e}")
 
-            # 3c. Build legal email body (Quicksand 14pt, two versions)
+            # 3c. Build legal email body (Cambria 14pt, variables en negrilla)
             email_subject = f"R{code} Notificación personal - {radicado} - {nombre}"
-            QS = "font-family:'Quicksand',Arial,sans-serif;font-size:14px;color:#222;line-height:1.7"
+            CB = "font-family:'Cambria','Georgia',serif;font-size:14px;color:#222;line-height:1.7"
+            _header_block = (
+                f'<p>Señores<br>Rappi S.A.S.<br>Felipe Villamarín Lafaurie</p>'
+                f'<p><strong>RADICADO</strong>: <strong>{radicado}</strong><br>'
+                f'<strong>REFERENCIA:</strong> Demanda ordinaria laboral promovida por '
+                f'<strong>{nombre}</strong> en contra de Rappi S.A.S.<br>'
+                f'<strong>ASUNTO</strong>: Notificación personal de auto admisorio de '
+                f'demanda ordinaria laboral de primera instancia</p>'
+                f'<p>Reciban un cordial saludo.</p>'
+            )
+            _footer_block = (
+                f'<p>Para los efectos legales correspondientes, junto con la presente '
+                f'comunicación se remiten los documentos que hacen parte de la actuación '
+                f'procesal y que permiten conocer integralmente el contenido de la providencia '
+                f'y de la demanda presentada, incluyendo el auto admisorio, el escrito de '
+                f'demanda con sus respectivos anexos y pruebas, el poder debidamente otorgado, '
+                f'así como los certificados de existencia y representación legal de las partes '
+                f'y el proyecto de liquidación de pretensiones elaborado para efectos '
+                f'ilustrativos del proceso.</p>'
+                f'<p>La presente notificación se realiza por este medio electrónico en los '
+                f'términos previstos en la normativa vigente, con el fin de garantizar el '
+                f'conocimiento oportuno de la providencia judicial y de la documentación que '
+                f'integra la actuación.</p>'
+                f'<p>Cordialmente,</p>'
+            )
             if fecha_admite_extracted:
                 email_body = (
-                    f'<div style="{QS}">'
-                    f'<p>Señores<br>Rappi S.A.S.<br>Felipe Villamarín Lafaurie</p>'
-                    f'<p><strong>RADICADO</strong>: </strong>{radicado}</strong><br>'
-                    f'<strong>REFERENCIA:</strong> Demanda ordinaria laboral promovida por '
-                    f'<strong>{nombre}</strong> en contra de </strong>Rappi S.A.S.</strong><br>'
-                    f'<strong>ASUNTO</strong>: Notificación personal de auto admisorio de '
-                    f'demanda ordinaria laboral de primera instancia</p>'
-                    f'<p>Reciban un cordial saludo.</p>'
+                    f'<div style="{CB}">'
+                    + _header_block +
                     f'<p>De manera atenta, y en cumplimiento de lo dispuesto en el artículo 8 '
                     f'de la Ley 2213 de 2022, nos permitimos notificarles el auto de fecha '
                     f'<strong>{fecha_admite_extracted}</strong>, mediante el cual el '
                     f'<strong>{juzgado}</strong> admitió la demanda ordinaria laboral presentada '
-                    f'por nuestro representado, el señor </strong>{nombre}</strong>, en contra de </strong>Rappi S.A.S.</strong></p>'
-                    f'<p>Para los efectos legales correspondientes, junto con la presente '
-                    f'comunicación se remiten los documentos que hacen parte de la actuación '
-                    f'procesal y que permiten conocer integralmente el contenido de la providencia '
-                    f'y de la demanda presentada, incluyendo el auto admisorio, el escrito de '
-                    f'demanda con sus respectivos anexos y pruebas, el poder debidamente otorgado, '
-                    f'así como los certificados de existencia y representación legal de las partes '
-                    f'y el proyecto de liquidación de pretensiones elaborado para efectos '
-                    f'ilustrativos del proceso.</p>'
-                    f'<p>La presente notificación se realiza por este medio electrónico en los '
-                    f'términos previstos en la normativa vigente, con el fin de garantizar el '
-                    f'conocimiento oportuno de la providencia judicial y de la documentación que '
-                    f'integra la actuación.</p>'
-                    f'<p>Cordialmente,</p>'
+                    f'por nuestro representado, el señor <strong>{nombre}</strong>, en contra de Rappi S.A.S.</p>'
+                    + _footer_block +
                     f'</div>'
                 )
             else:
                 email_body = (
-                    f'<div style="{QS}">'
-                    f'<p>Señores<br>Rappi S.A.S.<br>Felipe Villamarín Lafaurie</p>'
-                    f'<p><strong>RADICADO</strong>: </strong>{radicado}</strong><br>'
-                    f'<strong>REFERENCIA:</strong> Demanda ordinaria laboral promovida por '
-                    f'<strong>{nombre}</strong> en contra de </strong>Rappi S.A.S.</strong><br>'
-                    f'<strong>ASUNTO</strong>: Notificación personal de auto admisorio de '
-                    f'demanda ordinaria laboral de primera instancia</p>'
-                    f'<p>Reciban un cordial saludo.</p>'
+                    f'<div style="{CB}">'
+                    + _header_block +
                     f'<p>De manera atenta, y en cumplimiento de lo dispuesto en el artículo 8 '
                     f'de la Ley 2213 de 2022, nos permitimos notificarles el auto por medio del '
                     f'cual el <strong>{juzgado}</strong> admitió la demanda ordinaria laboral '
-                    f'presentada por nuestro representado, el señor {nombre}, en contra de '
-                    f'</strong>Rappi S.A.S.</strong></p>'
-                    f'<p>Para los efectos legales correspondientes, junto con la presente '
-                    f'comunicación se remiten los documentos que hacen parte de la actuación '
-                    f'procesal y que permiten conocer integralmente el contenido de la providencia '
-                    f'y de la demanda presentada, incluyendo el auto admisorio, el escrito de '
-                    f'demanda con sus respectivos anexos y pruebas, el poder debidamente otorgado, '
-                    f'así como los certificados de existencia y representación legal de las partes '
-                    f'y el proyecto de liquidación de pretensiones elaborado para efectos '
-                    f'ilustrativos del proceso.</p>'
-                    f'<p>La presente notificación se realiza por este medio electrónico en los '
-                    f'términos previstos en la normativa vigente, con el fin de garantizar el '
-                    f'conocimiento oportuno de la providencia judicial y de la documentación que '
-                    f'integra la actuación.</p>'
-                    f'<p>Cordialmente,</p>'
+                    f'presentada por nuestro representado, el señor <strong>{nombre}</strong>, en contra de '
+                    f'Rappi S.A.S.</p>'
+                    + _footer_block +
                     f'</div>'
                 )
 
@@ -1390,11 +1411,11 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             ] if p is not None and Path(p).exists()]
 
             if final_parts:
-                paquete_path = job_dir / f"R{code}_DDD_NP_done.pdf"
+                paquete_path = job_dir / f"R{code}.DDD.NP.done.pdf"
                 try:
                     merge_pdfs(final_parts, paquete_path)
                     paquetes.append(paquete_path)
-                    log(f"  OK R{code}_DDD_NP_done.pdf ({len(final_parts)} secciones)")
+                    log(f"  OK R{code}.DDD.NP.done.pdf ({len(final_parts)} secciones)")
                 except Exception as e:
                     log(f"  Error ensamblando R{code}: {e}")
             else:
