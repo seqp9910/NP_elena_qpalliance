@@ -1379,11 +1379,11 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             ] if p is not None and Path(p).exists()]
 
             if final_parts:
-                paquete_path = job_dir / f"R{code}.DDD.NP.done.pdf"
+                paquete_path = job_dir / f"R{code}_DDD_NP_done_pdf"
                 try:
                     merge_pdfs(final_parts, paquete_path)
                     paquetes.append(paquete_path)
-                    log(f"  OK R{code}.DDD.NP.done.pdf ({len(final_parts)} secciones)")
+                    log(f"  OK R{code}_DDD_NP_done_pdf ({len(final_parts)} secciones)")
                 except Exception as e:
                     log(f"  Error ensamblando R{code}: {e}")
             else:
