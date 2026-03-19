@@ -862,10 +862,11 @@ def merge_pdfs(pdf_list: list, output_path: Path):
     with open(output_path, 'wb') as f:
         writer.write(f)
 
-def build_separator_page(output_path: Path, text: str = 'DEMANDA'):
+def build_separator_page(output_path: Path, text: str = 'DEMANDA', code=None):
     """
     Build a branded separator page: QPAlliance logo + title text (centered group)
     + footer with address and website.
+    If code is provided, draws R{code} bold size-22 in the upper-right corner.
     """
     import base64, io
     from reportlab.lib.pagesizes import letter
@@ -952,6 +953,16 @@ def build_separator_page(output_path: Path, text: str = 'DEMANDA'):
     right_w = c.stringWidth(addr_right, FOOT_FONT, FOOT_SIZE)
     c.drawString(MARGIN, 30, addr_left)
     c.drawString(w - MARGIN - right_w, 30, addr_right)
+
+    # ── R{code} upper-right corner ────────────────────────────────────────────
+    if code is not None:
+        CODE_FONT = font_name   # same bold font
+        CODE_SIZE = 22
+        code_text = f'R{code}'
+        c.setFont(CODE_FONT, CODE_SIZE)
+        c.setFillColorRGB(0, 0, 0)
+        code_w = c.stringWidth(code_text, CODE_FONT, CODE_SIZE)
+        c.drawString(w - MARGIN - code_w, h - MARGIN - CODE_SIZE, code_text)
 
     c.save()
 
@@ -1303,7 +1314,6 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
                 fill_template(template_path, fill_data, docx_out,
                               no_date_mode=no_date_mode)
                 bold_filled_values(docx_out, fill_data)
-                add_code_to_docx_header(docx_out, code)
                 np_pdf = docx_to_pdf(docx_out, job_dir)
                 log(f"  OK NP generada: R{code} - {nombre}")
             except Exception as e:
@@ -1359,16 +1369,16 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
                 )
 
             # 3d. Build all 4 separator pages
-            def _sep(name):
+            def _sep(name, with_code=False):
                 p = job_dir / f"sep_{code}_{name}.pdf"
                 try:
-                    build_separator_page(p, name)
+                    build_separator_page(p, name, code=code if with_code else None)
                     return p
                 except Exception as e:
                     log(f"  Error separador '{name}' R{code}: {e}")
                     return None
 
-            sep_np    = _sep('NOTIFICACIÓN PERSONAL')
+            sep_np    = _sep('NOTIFICACIÓN PERSONAL', with_code=True)
             sep_aa    = _sep('AUTO ADMISORIO')
             sep_comp  = _sep('Comprobante de notificación personal')
             sep_dem   = _sep('DEMANDA')
