@@ -1263,9 +1263,9 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
                 email_body = (
                     f'<div style="{QS}">'
                     f'<p>Señores<br>Rappi S.A.S.<br>Felipe Villamarín Lafaurie</p>'
-                    f'<p><strong>RADICADO</strong>: {radicado}<br>'
+                    f'<p><strong>RADICADO</strong>: </strong>{radicado}</strong><br>'
                     f'<strong>REFERENCIA:</strong> Demanda ordinaria laboral promovida por '
-                    f'<strong>{nombre}</strong> en contra de Rappi S.A.S.<br>'
+                    f'<strong>{nombre}</strong> en contra de </strong>Rappi S.A.S.</strong><br>'
                     f'<strong>ASUNTO</strong>: Notificación personal de auto admisorio de '
                     f'demanda ordinaria laboral de primera instancia</p>'
                     f'<p>Reciban un cordial saludo.</p>'
@@ -1273,7 +1273,7 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
                     f'de la Ley 2213 de 2022, nos permitimos notificarles el auto de fecha '
                     f'<strong>{fecha_admite_extracted}</strong>, mediante el cual el '
                     f'<strong>{juzgado}</strong> admitió la demanda ordinaria laboral presentada '
-                    f'por nuestro representado, el señor {nombre}, en contra de Rappi S.A.S.</p>'
+                    f'por nuestro representado, el señor </strong>{nombre}</strong>, en contra de </strong>Rappi S.A.S.</strong></p>'
                     f'<p>Para los efectos legales correspondientes, junto con la presente '
                     f'comunicación se remiten los documentos que hacen parte de la actuación '
                     f'procesal y que permiten conocer integralmente el contenido de la providencia '
@@ -1293,9 +1293,9 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
                 email_body = (
                     f'<div style="{QS}">'
                     f'<p>Señores<br>Rappi S.A.S.<br>Felipe Villamarín Lafaurie</p>'
-                    f'<p><strong>RADICADO</strong>: {radicado}<br>'
+                    f'<p><strong>RADICADO</strong>: </strong>{radicado}</strong><br>'
                     f'<strong>REFERENCIA:</strong> Demanda ordinaria laboral promovida por '
-                    f'<strong>{nombre}</strong> en contra de Rappi S.A.S.<br>'
+                    f'<strong>{nombre}</strong> en contra de </strong>Rappi S.A.S.</strong><br>'
                     f'<strong>ASUNTO</strong>: Notificación personal de auto admisorio de '
                     f'demanda ordinaria laboral de primera instancia</p>'
                     f'<p>Reciban un cordial saludo.</p>'
@@ -1303,7 +1303,7 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
                     f'de la Ley 2213 de 2022, nos permitimos notificarles el auto por medio del '
                     f'cual el <strong>{juzgado}</strong> admitió la demanda ordinaria laboral '
                     f'presentada por nuestro representado, el señor {nombre}, en contra de '
-                    f'Rappi S.A.S.</p>'
+                    f'</strong>Rappi S.A.S.</strong></p>'
                     f'<p>Para los efectos legales correspondientes, junto con la presente '
                     f'comunicación se remiten los documentos que hacen parte de la actuación '
                     f'procesal y que permiten conocer integralmente el contenido de la providencia '
@@ -1379,11 +1379,11 @@ def run_job(job_id: str, job_dir: Path, codigos: list,
             ] if p is not None and Path(p).exists()]
 
             if final_parts:
-                paquete_path = job_dir / f"R{code}_DDD_NP_done_pdf"
+                paquete_path = job_dir / f"R{code}_DDD_NP_done.pdf"
                 try:
                     merge_pdfs(final_parts, paquete_path)
                     paquetes.append(paquete_path)
-                    log(f"  OK R{code}_DDD_NP_done_pdf ({len(final_parts)} secciones)")
+                    log(f"  OK R{code}_DDD_NP_done.pdf ({len(final_parts)} secciones)")
                 except Exception as e:
                     log(f"  Error ensamblando R{code}: {e}")
             else:
